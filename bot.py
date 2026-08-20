@@ -767,4 +767,4 @@ def process_command(event):
         city = ' '.join(args)
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
         try:
-            response = requests.get(url
+            response = requests.get(url)
