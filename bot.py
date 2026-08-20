@@ -16,7 +16,7 @@ import sys
 import subprocess
 
 # ================= КОНФИГУРАЦИЯ =================
-USER_TOKEN = 'vk1.a.4Di2g-69fh8lTDNbahPH8tKGkYB6bSTFQ45O_5AYN5nCjr5a1N4PhFTqCvGdXTmGBwovyGGDYWeIvm_T7FmzU6v3VnpxCeettJEHaIoVnpwxyqgzxBS0e3r2-Xff7ehQliozbXu4BYavt-Ctc1avRG9h_t7O_f9mt2eiqX36waXHh-qT1dwc5VkNhjtJBXjRFhbKMtOO8IAQ41FTjjC7bQ'
+USER_TOKEN = 'https://oauth.vk.ru/blank.html#access_token=vk1.a.-skjA_qahwjDiig9rqTCTv37LhrNZxdmNvpJpfU0CSMvz-glB0brCdw1VkLk6ZVLOYPsL7h5b7kYORIS5ga5NKHCNFKoRYgU1hV_RgWXjUqaFjl2M5d2i-lwtiGmGYRLV-pvf-6b7_27ztOgrRC67z2Fys0NNJcXtIlltt2tDVfUSe-X3uj5d_ilHghBh2LLxd2ae1INY5CesZwxG-nukQ&expires_in=0&user_id=1116380571&email=nyshkazxc@gmail.com'
 WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
 CREATOR_ID = 1116380571
 ADMIN_IDS = [875762552]
