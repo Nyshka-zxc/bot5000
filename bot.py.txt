@@ -1,0 +1,770 @@
+import vk_api
+from vk_api.longpoll import VkLongPoll, VkEventType
+from vk_api.utils import get_random_id
+import requests
+import sqlite3
+import random
+import time
+import datetime
+import re
+import json
+import os
+from PIL import Image, ImageDraw, ImageFont
+import io
+import math
+import sys
+import subprocess
+
+# ================= КОНФИГУРАЦИЯ =================
+USER_TOKEN = 'vk1.a.4Di2g-69fh8lTDNbahPH8tKGkYB6bSTFQ45O_5AYN5nCjr5a1N4PhFTqCvGdXTmGBwovyGGDYWeIvm_T7FmzU6v3VnpxCeettJEHaIoVnpwxyqgzxBS0e3r2-Xff7ehQliozbXu4BYavt-Ctc1avRG9h_t7O_f9mt2eiqX36waXHh-qT1dwc5VkNhjtJBXjRFhbKMtOO8IAQ41FTjjC7bQ'
+WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
+CREATOR_ID = 1116380571
+ADMIN_IDS = [875762552]
+DEFAULT_PREFIX = '/'
+DB_FILE = 'bot.db'
+IMAGES_DIR = 'images'
+
+# ===== НАСТРОЙКИ GPT API =====
+GPT_API_KEY = 'sk-tkn-5e9c49b5-5d22-4087-b950-4c399affbaf9'  # Вставьте сюда ваш ключ от OpenAI
+GPT_API_URL = "https://api.openai.com/v1/chat/completions"
+GPT_MODEL = "gpt-3.5-turbo"  # Можно изменить на "gpt-4" если есть доступ
+
+# Словарь для хранения контекстов пользователей
+AI_CONTEXTS = {}
+
+ANECDOTES = [
+    "Штирлиц склонился над картой СССР. Его неудержимо рвало на родину.",
+    "Купил мужик шляпу, а она ему как раз.",
+    "Один друг спрашивает другого: - Ты чего такой грустный? - Да вот, жена уехала. - А чего грустить? - Так я ее люблю!",
+    "Объявление: Продам котят. Не дорого. Дорого только корм для них.",
+    "Парадокс: в России два беды - дураки и дороги. Но если их соединить, получатся выборы."
+]
+# ================================================
+
+# Функция для обращения к GPT
+def ask_gpt(question, system_prompt="Вы - полезный ассистент в VK боте. Отвечайте кратко и по делу на русском языке."):
+    """Функция для обращения к GPT API"""
+    if GPT_API_KEY == 'ВАШ_КЛЮЧ_OPENAI_API':
+        return "❌ Ошибка: Не установлен API ключ GPT. Добавьте ваш ключ в переменную GPT_API_KEY"
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {GPT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": GPT_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
+            ],
+            "max_tokens": 500,
+            "temperature": 0.7
+        }
+        
+        response = requests.post(GPT_API_URL, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        elif response.status_code == 401:
+            return "❌ Ошибка: Неверный API ключ"
+        elif response.status_code == 429:
+            return "❌ Ошибка: Превышен лимит запросов. Попробуйте позже."
+        else:
+            return f"❌ Ошибка API: {response.status_code} - {response.text[:200]}"
+            
+    except requests.exceptions.Timeout:
+        return "❌ Ошибка: Время ожидания истекло. Попробуйте еще раз."
+    except Exception as e:
+        return f"❌ Ошибка при обращении к GPT: {str(e)}"
+
+# Инициализация VK
+vk_session = vk_api.VkApi(token=USER_TOKEN)
+vk = vk_session.get_api()
+longpoll = VkLongPoll(vk_session)
+
+# Получаем ID владельца токена
+try:
+    owner_info = vk.users.get()[0]
+    OWNER_ID = owner_info['id']
+except:
+    OWNER_ID = CREATOR_ID
+
+# ================= БАЗА ДАННЫХ =================
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
+
+def init_db():
+    cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        access_token TEXT,
+        role INTEGER DEFAULT 0,
+        btc INTEGER DEFAULT 0,
+        dofamin INTEGER DEFAULT 0,
+        herzog INTEGER DEFAULT 0,
+        protection INTEGER DEFAULT 0,
+        registered_at TIMESTAMP,
+        last_dofamin_time REAL DEFAULT 0,
+        last_steal_time REAL DEFAULT 0,
+        last_prize_time REAL DEFAULT 0,
+        stars INTEGER DEFAULT 0,
+        trusted_ids TEXT DEFAULT '[]',
+        prefix TEXT DEFAULT '/',
+        is_disabled INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS chat_prefixes (
+        chat_id INTEGER PRIMARY KEY,
+        prefix TEXT DEFAULT '/'
+    );
+    CREATE TABLE IF NOT EXISTS bans (
+        user_id INTEGER,
+        reason TEXT,
+        expires_at REAL,
+        banned_by INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS access_cmds (
+        user_id INTEGER PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS history (
+        user_id INTEGER,
+        action TEXT,
+        timestamp REAL
+    );
+    CREATE TABLE IF NOT EXISTS custom_gs (
+        name TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS custom_shab (
+        name TEXT PRIMARY KEY
+    );
+    ''')
+    conn.commit()
+
+init_db()
+
+def db_get_user(user_id):
+    cursor.execute('SELECT * FROM users WHERE user_id=?', (user_id,))
+    return cursor.fetchone()
+
+def db_create_user(user_id, access_token=None):
+    if not db_get_user(user_id):
+        role = 3 if user_id in ADMIN_IDS else 0
+        cursor.execute('INSERT INTO users (user_id, access_token, role, registered_at) VALUES (?,?,?,?)',
+                       (user_id, access_token, role, time.time()))
+        conn.commit()
+
+def db_update_user(user_id, **kwargs):
+    keys = ', '.join(f'{k}=?' for k in kwargs)
+    values = list(kwargs.values()) + [user_id]
+    cursor.execute(f'UPDATE users SET {keys} WHERE user_id=?', values)
+    conn.commit()
+
+def db_get_trusted(user_id):
+    row = db_get_user(user_id)
+    if row:
+        return json.loads(row[12])
+    return []
+
+def db_add_trusted(user_id, trusted_id):
+    trusted = db_get_trusted(user_id)
+    if trusted_id not in trusted:
+        trusted.append(trusted_id)
+        db_update_user(user_id, trusted_ids=json.dumps(trusted))
+
+def db_remove_trusted(user_id, trusted_id):
+    trusted = db_get_trusted(user_id)
+    if trusted_id in trusted:
+        trusted.remove(trusted_id)
+        db_update_user(user_id, trusted_ids=json.dumps(trusted))
+
+def get_prefix(chat_id):
+    cursor.execute('SELECT prefix FROM chat_prefixes WHERE chat_id=?', (chat_id,))
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+    return DEFAULT_PREFIX
+
+def set_prefix(chat_id, new_prefix):
+    cursor.execute('INSERT OR REPLACE INTO chat_prefixes (chat_id, prefix) VALUES (?,?)', (chat_id, new_prefix))
+    conn.commit()
+
+def get_access_users():
+    cursor.execute('SELECT user_id FROM access_cmds')
+    return [row[0] for row in cursor.fetchall()]
+
+def is_user_disabled(user_id):
+    row = db_get_user(user_id)
+    if row:
+        return row[14] == 1
+    return False
+
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+def is_creator(user_id):
+    return user_id in ADMIN_IDS
+
+def get_role(user_id):
+    row = db_get_user(user_id)
+    return row[2] if row else 0
+
+def is_emperor(user_id):
+    return user_id in ADMIN_IDS or get_role(user_id) >= 3
+
+def is_prince(user_id):
+    return user_id in ADMIN_IDS or get_role(user_id) >= 2
+
+def is_elite(user_id):
+    return user_id in ADMIN_IDS or get_role(user_id) >= 1
+
+def is_admin(user_id):
+    return is_prince(user_id)
+
+def parse_target_id(event):
+    if event.reply_message:
+        return event.reply_message['from_id']
+    match = re.search(r'\[id(\d+)\|', event.text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'@id(\d+)', event.text)
+    if match:
+        return int(match.group(1))
+    return None
+
+def check_cooldown(user_id, action, cooldown_seconds):
+    row = db_get_user(user_id)
+    if not row:
+        return True
+    field_map = {
+        'dofamin': 8,
+        'steal': 9,
+        'prize': 10
+    }
+    last_time = row[field_map[action]]
+    return (time.time() - last_time) >= cooldown_seconds
+
+def update_cooldown(user_id, action):
+    field_map = {
+        'dofamin': 'last_dofamin_time',
+        'steal': 'last_steal_time',
+        'prize': 'last_prize_time'
+    }
+    db_update_user(user_id, **{field_map[action]: time.time()})
+
+def send_message(peer_id, message, attachment=None):
+    vk.messages.send(
+        peer_id=peer_id,
+        message=message,
+        attachment=attachment,
+        random_id=get_random_id()
+    )
+
+def download_photo(url):
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.content
+    return None
+
+def get_user_info(user_id):
+    try:
+        info = vk.users.get(user_ids=user_id, fields='photo_max_orig,status,counters,friend_status,online')
+        if info:
+            return info[0]
+    except:
+        pass
+    return None
+
+def get_user_avatar(user_id):
+    info = get_user_info(user_id)
+    if info and 'photo_max_orig' in info:
+        return info['photo_max_orig']
+    return None
+
+def get_random_image(folder_path):
+    if os.path.isdir(folder_path):
+        photos = [f for f in os.listdir(folder_path) if f.endswith(('.jpg', '.png', '.jpeg', '.gif'))]
+        if photos:
+            return os.path.join(folder_path, random.choice(photos))
+    return None
+
+def upload_photo_to_vk(peer_id, photo_path):
+    try:
+        upload = vk.photos.getMessagesUploadServer(peer_id=peer_id)['upload_url']
+        with open(photo_path, 'rb') as f:
+            response = requests.post(upload, files={'photo': f}).json()
+        saved = vk.photos.saveMessagesPhoto(**response)[0]
+        return f"photo{saved['owner_id']}_{saved['id']}"
+    except Exception as e:
+        print(f"Ошибка загрузки фото: {e}")
+        return None
+
+# ================= ОБРАБОТЧИК КОМАНД =================
+def process_command(event):
+    if not event.text:
+        return
+    chat_id = event.peer_id
+    if event.from_chat:
+        chat_id = event.chat_id
+    prefix = get_prefix(chat_id)
+    if not event.text.startswith(prefix):
+        return
+    text = event.text[len(prefix):].strip()
+    if not text:
+        return
+    parts = text.split()
+    command = parts[0].lower()
+    args = parts[1:]
+
+    user_id = event.user_id
+
+    if is_user_disabled(user_id) and not is_creator(user_id):
+        send_message(event.peer_id, "⛔ Ваш доступ к боту отключён создателем.")
+        return
+
+    db_create_user(user_id)
+
+    # ===== ОБЩИЕ КОМАНДЫ =====
+    if command == 'help':
+        help_text = """
+        Список команд:
+        /help — это сообщение
+        /dox (ссылка или ответ) — открытая информация о человеке
+        /doxelp (ссылка или ответ) — закрытая информация (админы)
+        /стат (ссылка или ответ) — профиль в боте
+        /казино (ставка) (количество) — игра на бтс
+        /выдатьбтс (ссылка/ответ) (кол-во) — выдать бтс (админы)
+        /герцог — купить подписку Герцог
+        /выдгерцог (ссылка/ответ) — выдать Герцога (админы)
+        /дофамин — получить дофамин (кулдаун 1-4 раза в час)
+        /украстьдоф (ссылка/ответ) — украсть дофамин (кулдаун 1-3 раза в час)
+        /защитадоф — купить защиту от кражи (500 бтс)
+        /выдзащита (ссылка/ответ) — выдать защиту (админы)
+        /стикеры (ссылка/ответ) — посмотреть стикеры игрока
+        /sp (ссылка/ответ) — добавить в доверенность
+        /unsp (ссылка/ответ) — убрать из доверенности
+        /vls (ссылка/ответ) — отправить сообщение в ЛС
+        /ai (запрос) — спросить ИИ (GPT)
+        /ai_контекст (текст) — установить контекст для ИИ
+        /cc (ссылка) — сократить ссылку
+        /+гс (название) — добавить гс
+        /гсы — список гс
+        /-гс (название) — удалить гс
+        /+шаб (название)
+        /шаблоны — список шаблонов
+        /-шаб (название)
+        /подбор (0-10) — подбор паролей
+        /+invite — пригласить друзей в чат
+        /-invite — остановить приглашение
+        /password — подбор пароля
+        /погода (город) — погода
+        /шар (вопрос) — магический шар
+        /+описание (текст) — сменить статус VK
+        /аватарка (ссылка/ответ) — отправить аватар
+        /-смс (ссылка/ответ) (кол-во) — удалить сообщения
+        /цитата (фото+текст) — создать цитату
+        /демо (текст) — демотиватор
+        /пинг — проверка
+        /тян — фото тянки
+        /ножки — фото ножек
+        /анекдот — случайный анекдот
+        /префикс (префикс) — сменить префикс
+        /+роль (0-3) (ссылка/ответ) — выдать роль (создатель)
+        /-роль (ссылка/ответ) — забрать роль (создатель)
+        /стафф — список персонала
+        /доступы — список с доступом к -смс
+        /+доступ (ссылка/ответ) — выдать доступ к -смс
+        /-доступ (ссылка/ответ) — забрать доступ
+        /добавить (ссылка/ответ) — добавить в беседу
+        /кик (ссылка/ответ) — кикнуть из беседы
+        /реши (пример) — решить пример
+        /чистка (кол-во) — удалить свои сообщения
+        /приз — получить бтс (раз в 2 часа)
+        /helpr1 — команды ранга Элита
+        /helpr2 — команды ранга Князь
+        /helpr3 — команды ранга Император
+        /reg (токен) — зарегистрировать свой токен
+        
+        🔧 Команды разработчика:
+        /restart — перезапустить бота (только разработчика)
+        /stop — остановить бота (только разработчика)
+        /сброс (токен/ID) — сбросить токен пользователя (только разработчика)
+        /отключение (ссылка/ответ) — отключить пользователя от бота (только разработчика)
+        /включение (ссылка/ответ) — включить пользователя обратно (только разработчика)
+        /токен инфа (токен) — информация о токене (только разработчика)
+        """
+        send_message(event.peer_id, help_text)
+
+    elif command == 'ai':
+        query = ' '.join(args)
+        if not query:
+            send_message(event.peer_id, "Введите запрос. Например: /ai расскажи о космосе")
+            return
+        
+        # Получаем контекст пользователя или используем стандартный
+        context = AI_CONTEXTS.get(user_id, "Вы - полезный ассистент в VK боте. Отвечайте кратко и по делу на русском языке.")
+        
+        # Отправляем сообщение о том, что бот думает
+        send_message(event.peer_id, "🤔 Думаю над ответом...")
+        
+        # Получаем ответ от GPT
+        answer = ask_gpt(query, context)
+        
+        # Ограничиваем длину ответа для VK (максимум 4096 символов)
+        if len(answer) > 4000:
+            answer = answer[:4000] + "..."
+        
+        send_message(event.peer_id, f"🤖 Ответ ИИ:\n\n{answer}")
+
+    elif command == 'ai_контекст' or command == 'ai_context':
+        if not args:
+            send_message(event.peer_id, "Использование: /ai_контекст (текст контекста)")
+            return
+        context = ' '.join(args)
+        AI_CONTEXTS[user_id] = context
+        send_message(event.peer_id, f"✅ Контекст ИИ установлен: {context}")
+
+    elif command == 'reg':
+        if len(args) >= 1:
+            token = args[0]
+            db_update_user(user_id, access_token=token)
+            send_message(event.peer_id, "✅ Токен сохранён. Теперь вы можете использовать закрытые функции.")
+        else:
+            send_message(event.peer_id, "Использование: /reg (токен)")
+
+    elif command == 'dox':
+        target_id = parse_target_id(event) or user_id
+        info = get_user_info(target_id)
+        if info:
+            counters = info.get('counters', {})
+            friends = counters.get('friends', 0)
+            followers = counters.get('followers', 0)
+            photos = counters.get('photos', 0)
+            status = info.get('status', '')
+            online = 'Онлайн' if info.get('online') else 'Оффлайн'
+            message = f"👤 {info['first_name']} {info['last_name']}\n"
+            message += f"Статус: {status}\n"
+            message += f"Друзья: {friends}\n"
+            message += f"Подписчики: {followers}\n"
+            message += f"Фотографии: {photos}\n"
+            message += f"Статус: {online}"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Не удалось получить информацию.")
+
+    elif command == 'doxelp':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id = parse_target_id(event) or user_id
+        send_message(event.peer_id, f"Закрытая информация о пользователе {target_id}:\nEmail: скрыт (нет доступа)\nСоцсети: не найдены")
+
+    elif command == 'стат':
+        target_id = parse_target_id(event) or user_id
+        row = db_get_user(target_id)
+        if row:
+            reg_time = datetime.datetime.fromtimestamp(row[7]).strftime('%Y-%m-%d %H:%M') if row[7] else 'неизвестно'
+            role_names = {0: 'Обычный', 1: 'Элита', 2: 'Князь', 3: 'Император'}
+            role = role_names.get(row[2], 'Неизвестно')
+            disabled = '🔴 Отключён' if row[14] else '✅ Активен'
+            message = f"📊 Профиль пользователя {target_id}:\n"
+            message += f"Зарегистрирован: {reg_time}\n"
+            message += f"БТС: {row[3]}\n"
+            message += f"Дофамин: {row[4]}\n"
+            message += f"Герцог: {'Да' if row[5] else 'Нет'}\n"
+            message += f"Защита: {'Да' if row[6] else 'Нет'}\n"
+            message += f"Роль: {role}\n"
+            message += f"Статус: {disabled}"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Пользователь не зарегистрирован в боте.")
+
+    elif command == 'казино':
+        if len(args) < 2:
+            send_message(event.peer_id, "Использование: /казино (ставка) (количество)")
+            return
+        try:
+            stavka = args[0]
+            amount = int(args[1])
+            if amount <= 0:
+                raise ValueError
+        except:
+            send_message(event.peer_id, "Неверный формат. Пример: /казино х2 100")
+            return
+        multipliers = {'х2': 2, 'х3': 3, 'х5': 5, 'х10': 10}
+        if stavka not in multipliers:
+            send_message(event.peer_id, "Доступные ставки: х2, х3, х5, х10")
+            return
+        row = db_get_user(user_id)
+        if row[3] < amount:
+            send_message(event.peer_id, "Недостаточно БТС.")
+            return
+        win = random.random() < 0.3
+        if win:
+            prize = amount * multipliers[stavka]
+            db_update_user(user_id, btc=row[3] + prize)
+            send_message(event.peer_id, f"🎉 Поздравляем! Вы выиграли {prize} БТС!")
+        else:
+            db_update_user(user_id, btc=row[3] - amount)
+            send_message(event.peer_id, f"😞 Вы проиграли {amount} БТС.")
+
+    elif command == 'выдатьбтс':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        if len(args) < 2:
+            send_message(event.peer_id, "Использование: /выдатьбтс (ссылка/ответ) (количество)")
+            return
+        target_id = parse_target_id(event)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя.")
+            return
+        try:
+            amount = int(args[-1])
+        except:
+            send_message(event.peer_id, "Неверное количество.")
+            return
+        db_create_user(target_id)
+        row = db_get_user(target_id)
+        db_update_user(target_id, btc=row[3] + amount)
+        send_message(event.peer_id, f"✅ Выдано {amount} БТС пользователю {target_id}.")
+
+    elif command == 'герцог':
+        row = db_get_user(user_id)
+        cost = 1000
+        if row[5]:
+            send_message(event.peer_id, "Вы уже Герцог.")
+            return
+        if row[3] < cost:
+            send_message(event.peer_id, f"Недостаточно БТС. Нужно {cost}.")
+            return
+        db_update_user(user_id, btc=row[3] - cost, herzog=1)
+        send_message(event.peer_id, "👑 Поздравляем! Вы стали Герцогом!")
+
+    elif command == 'выдгерцог':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id = parse_target_id(event) or user_id
+        db_create_user(target_id)
+        db_update_user(target_id, herzog=1)
+        send_message(event.peer_id, f"✅ Герцог выдан пользователю {target_id}.")
+
+    elif command == 'дофамин':
+        if not check_cooldown(user_id, 'dofamin', 900):
+            send_message(event.peer_id, "Слишком часто. Попробуйте позже.")
+            return
+        amount = random.randint(1, 10)
+        row = db_get_user(user_id)
+        db_update_user(user_id, dofamin=row[4] + amount)
+        update_cooldown(user_id, 'dofamin')
+        send_message(event.peer_id, f"🧪 Вы получили {amount} дофамина!")
+
+    elif command == 'украстьдоф':
+        if not check_cooldown(user_id, 'steal', 1200):
+            send_message(event.peer_id, "Слишком часто. Попробуйте позже.")
+            return
+        target_id = parse_target_id(event)
+        if not target_id or target_id == user_id:
+            send_message(event.peer_id, "Укажите цель.")
+            return
+        row_target = db_get_user(target_id)
+        if not row_target or row_target[4] <= 0:
+            send_message(event.peer_id, "У цели нет дофамина.")
+            return
+        if row_target[6]:
+            send_message(event.peer_id, "У цели есть защита! Кража не удалась.")
+            return
+        steal_amount = random.randint(1, min(10, row_target[4]))
+        if random.random() < 0.6:
+            db_update_user(target_id, dofamin=row_target[4] - steal_amount)
+            row_user = db_get_user(user_id)
+            db_update_user(user_id, dofamin=row_user[4] + steal_amount)
+            send_message(event.peer_id, f"✅ Вы украли {steal_amount} дофамина!")
+        else:
+            send_message(event.peer_id, "❌ Вас поймали! Кража не удалась.")
+        update_cooldown(user_id, 'steal')
+
+    elif command == 'защитадоф':
+        row = db_get_user(user_id)
+        cost = 500
+        if row[6]:
+            send_message(event.peer_id, "У вас уже есть защита.")
+            return
+        if row[3] < cost:
+            send_message(event.peer_id, f"Недостаточно БТС. Нужно {cost}.")
+            return
+        db_update_user(user_id, btc=row[3] - cost, protection=1)
+        send_message(event.peer_id, "🛡 Вы купили защиту от кражи дофамина.")
+
+    elif command == 'выдзащита':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id = parse_target_id(event) or user_id
+        db_create_user(target_id)
+        db_update_user(target_id, protection=1)
+        send_message(event.peer_id, f"✅ Защита выдана пользователю {target_id}.")
+
+    elif command == 'стикеры':
+        target_id = parse_target_id(event) or user_id
+        send_message(event.peer_id, f"У пользователя {target_id} много стикеров (заглушка).")
+
+    elif command == 'sp':
+        if len(args) < 1:
+            send_message(event.peer_id, "Использование: /sp (сообщение) — отправить сообщение от имени бота")
+            return
+        target_id = parse_target_id(event)
+        if not target_id:
+            trusted = db_get_trusted(user_id)
+            if not trusted:
+                send_message(event.peer_id, "У вас нет доверенных пользователей.")
+                return
+            msg = ' '.join(args)
+            for trusted_id in trusted:
+                try:
+                    vk.messages.send(peer_id=trusted_id, message=msg, random_id=get_random_id())
+                    time.sleep(0.3)
+                except:
+                    continue
+            send_message(event.peer_id, f"✅ Сообщение отправлено {len(trusted)} доверенным пользователям.")
+        else:
+            if target_id not in db_get_trusted(user_id) and not is_admin(user_id):
+                send_message(event.peer_id, "⛔ Пользователь не в доверенности.")
+                return
+            msg = ' '.join(args)
+            try:
+                vk.messages.send(peer_id=target_id, message=msg, random_id=get_random_id())
+                send_message(event.peer_id, f"✅ Сообщение отправлено пользователю {target_id}.")
+            except Exception as e:
+                send_message(event.peer_id, f"❌ Не удалось отправить: {e}")
+
+    elif command == 'unsp':
+        target_id = parse_target_id(event)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя.")
+            return
+        db_remove_trusted(user_id, target_id)
+        send_message(event.peer_id, f"✅ Пользователь {target_id} убран из доверенности.")
+
+    elif command == 'vls':
+        target_id = parse_target_id(event)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя.")
+            return
+        if target_id not in db_get_trusted(user_id) and not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Пользователь не в доверенности.")
+            return
+        try:
+            vk.messages.send(peer_id=target_id, message="Привет! Это сообщение от бота.", random_id=get_random_id())
+            send_message(event.peer_id, f"✅ Сообщение отправлено пользователю {target_id}.")
+        except Exception as e:
+            send_message(event.peer_id, f"❌ Не удалось отправить: {e}")
+
+    elif command == 'cc':
+        if not args:
+            send_message(event.peer_id, "Укажите ссылку.")
+            return
+        url = args[0]
+        try:
+            short = vk.utils.getShortLink(url=url)
+            send_message(event.peer_id, f"Короткая ссылка: {short['short_url']}")
+        except Exception as e:
+            send_message(event.peer_id, f"Ошибка: {e}")
+
+    elif command == '+гс':
+        name = ' '.join(args)
+        if not name:
+            send_message(event.peer_id, "Укажите название.")
+            return
+        cursor.execute('INSERT OR IGNORE INTO custom_gs (name) VALUES (?)', (name,))
+        conn.commit()
+        send_message(event.peer_id, f"✅ ГС '{name}' добавлен.")
+
+    elif command == 'гсы':
+        cursor.execute('SELECT name FROM custom_gs')
+        rows = cursor.fetchall()
+        if rows:
+            send_message(event.peer_id, "Список ГС:\n" + '\n'.join([r[0] for r in rows]))
+        else:
+            send_message(event.peer_id, "Список пуст.")
+
+    elif command == '-гс':
+        name = ' '.join(args)
+        if not name:
+            send_message(event.peer_id, "Укажите название.")
+            return
+        cursor.execute('DELETE FROM custom_gs WHERE name=?', (name,))
+        conn.commit()
+        send_message(event.peer_id, f"✅ ГС '{name}' удалён.")
+
+    elif command == '+шаб':
+        name = ' '.join(args)
+        if not name:
+            send_message(event.peer_id, "Укажите название шаблона.")
+            return
+        cursor.execute('INSERT OR IGNORE INTO custom_shab (name) VALUES (?)', (name,))
+        conn.commit()
+        send_message(event.peer_id, f"✅ Шаблон '{name}' добавлен.")
+
+    elif command == 'шаблоны':
+        cursor.execute('SELECT name FROM custom_shab')
+        rows = cursor.fetchall()
+        if rows:
+            send_message(event.peer_id, "Шаблоны:\n" + '\n'.join([r[0] for r in rows]))
+        else:
+            send_message(event.peer_id, "Шаблонов нет.")
+
+    elif command == '-шаб':
+        name = ' '.join(args)
+        if not name:
+            send_message(event.peer_id, "Укажите название.")
+            return
+        cursor.execute('DELETE FROM custom_shab WHERE name=?', (name,))
+        conn.commit()
+        send_message(event.peer_id, f"✅ Шаблон '{name}' удалён.")
+
+    elif command == 'подбор':
+        if not args:
+            send_message(event.peer_id, "Использование: /подбор (0-10)")
+            return
+        try:
+            start, end = map(int, args[0].split('-'))
+            if start > end:
+                start, end = end, start
+            passwords = [str(random.randint(start, end)) for _ in range(5)]
+            send_message(event.peer_id, "Подобранные пароли:\n" + '\n'.join(passwords))
+        except:
+            send_message(event.peer_id, "Неверный формат. Пример: /подбор 0-10")
+
+    elif command == '+invite':
+        if not event.from_chat:
+            send_message(event.peer_id, "Команда доступна только в беседе.")
+            return
+        try:
+            friends = vk.friends.get(user_id=user_id, count=1000)['items']
+            added = 0
+            for friend_id in friends:
+                try:
+                    vk.messages.addChatUser(chat_id=event.chat_id, user_id=friend_id)
+                    added += 1
+                    time.sleep(0.3)
+                except:
+                    continue
+            send_message(event.peer_id, f"✅ Приглашено друзей: {added}")
+        except Exception as e:
+            send_message(event.peer_id, f"Ошибка: {e}")
+
+    elif command == '-invite':
+        send_message(event.peer_id, "Приглашение остановлено.")
+
+    elif command == 'password':
+        send_message(event.peer_id, "🔐 Начинаю подбор пароля... (заглушка)")
+
+    elif command == 'погода':
+        if not args:
+            send_message(event.peer_id, "Укажите город.")
+            return
+        city = ' '.join(args)
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+        try:
+            response = requests.get(url
