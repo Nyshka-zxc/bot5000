@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ================= КОНФИГУРАЦИЯ =================
 USER_TOKEN = 'vk1.a.-skjA_qahwjDiig9rqTCTv37LhrNZxdmNvpJpfU0CSMvz-glB0brCdw1VkLk6ZVLOYPsL7h5b7kYORIS5ga5NKHCNFKoRYgU1hV_RgWXjUqaFjl2M5d2i-lwtiGmGYRLV-pvf-6b7_27ztOgrRC67z2Fys0NNJcXtIlltt2tDVfUSe-X3uj5d_ilHghBh2LLxd2ae1INY5CesZwxG-nukQ'
-WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2''
+WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
 WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
 OWNER_ID = 1116380571
 ADMIN_IDS = [1116380571]
