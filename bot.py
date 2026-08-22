@@ -1,6 +1,7 @@
 import vk_api
 from vk_api.longpoll import VkLongPoll, VkEventType
 from vk_api.utils import get_random_id
+from vk_api import VkUpload
 import requests
 import sqlite3
 import random
@@ -9,13 +10,14 @@ import datetime
 import re
 import json
 import os
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 import io
 import math
 import sys
 import subprocess
 import secrets
 import threading
+import textwrap
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ================= КОНФИГУРАЦИЯ =================
 USER_TOKEN = 'vk1.a.-skjA_qahwjDiig9rqTCTv37LhrNZxdmNvpJpfU0CSMvz-glB0brCdw1VkLk6ZVLOYPsL7h5b7kYORIS5ga5NKHCNFKoRYgU1hV_RgWXjUqaFjl2M5d2i-lwtiGmGYRLV-pvf-6b7_27ztOgrRC67z2Fys0NNJcXtIlltt2tDVfUSe-X3uj5d_ilHghBh2LLxd2ae1INY5CesZwxG-nukQ'
@@ -29,13 +31,12 @@ TEMPLATES_DIR = 'templates'
 
 # ===== НАСТРОЙКИ GPT API =====
 GPT_API_KEY = 'sk-RLbhraB12P6rLJjEFTZyjzzlLEOXbEKg'
-GPT_API_URL = "https://routerai.ru/api/v1"
+GPT_API_URL = "https://routerai.ru/api/v1/chat/completions"
 GPT_MODEL = "gpt-3.5-turbo"
 
 # ===== API ДЛЯ КУРСОВ ВАЛЮТ =====
 EXCHANGE_API_KEY = '10f01d7c62ada0e2dc550445'
 
-# ===== СПИСОК ЗАПРЕЩЁННЫХ СЛОВ =====
 BAD_WORDS = ['мат', 'хуй', 'пизда', 'бля', 'сука', 'говно', 'мудак', 'нахуй', 'пидр', 'еблан']
 
 ANECDOTES = [
@@ -46,42 +47,10 @@ ANECDOTES = [
     "Парадокс: в России два беды - дураки и дороги. Но если их соединить, получатся выборы."
 ]
 
-# ================= ФУНКЦИИ GPT =================
-def ask_gpt(question, system_prompt="Вы - полезный ассистент в VK боте. Отвечайте кратко и по делу на русском языке."):
-    if GPT_API_KEY == 'ВАШ_КЛЮЧ_OPENAI_API':
-        return "❌ Ошибка: Не установлен API ключ GPT. Добавьте ваш ключ в переменную GPT_API_KEY"
-    try:
-        headers = {
-            "Authorization": f"Bearer {GPT_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": GPT_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            "max_tokens": 500,
-            "temperature": 0.7
-        }
-        response = requests.post(GPT_API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        elif response.status_code == 401:
-            return "❌ Ошибка: Неверный API ключ"
-        elif response.status_code == 429:
-            return "❌ Ошибка: Превышен лимит запросов. Попробуйте позже."
-        else:
-            return f"❌ Ошибка API: {response.status_code} - {response.text[:200]}"
-    except requests.exceptions.Timeout:
-        return "❌ Ошибка: Время ожидания истекло. Попробуйте еще раз."
-    except Exception as e:
-        return f"❌ Ошибка при обращении к GPT: {str(e)}"
-
 # ================= ИНИЦИАЛИЗАЦИЯ VK =================
 vk_session = vk_api.VkApi(token=USER_TOKEN)
 vk = vk_session.get_api()
+uploader = VkUpload(vk_session)
 longpoll = VkLongPoll(vk_session)
 
 try:
@@ -117,7 +86,8 @@ def init_db():
         last_message_time REAL DEFAULT 0,
         warning_count INTEGER DEFAULT 0,
         birthday TEXT DEFAULT '',
-        clan_id INTEGER DEFAULT NULL
+        clan_id INTEGER DEFAULT NULL,
+        poker_koins INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS chat_prefixes (
         chat_id INTEGER PRIMARY KEY,
@@ -198,37 +168,53 @@ def init_db():
         banned_by INTEGER,
         banned_at REAL
     );
+    CREATE TABLE IF NOT EXISTS poker_state (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        rate REAL DEFAULT 0.001,
+        last_update REAL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS families (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        leader_id INTEGER,
+        balance_btc INTEGER DEFAULT 0,
+        balance_dofamin INTEGER DEFAULT 0,
+        created_at REAL
+    );
+    CREATE TABLE IF NOT EXISTS family_members (
+        family_id INTEGER,
+        user_id INTEGER PRIMARY KEY,
+        role TEXT DEFAULT 'member',
+        joined_at REAL
+    );
+    CREATE TABLE IF NOT EXISTS marriages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user1 INTEGER,
+        user2 INTEGER,
+        created_at REAL,
+        UNIQUE(user1),
+        UNIQUE(user2)
+    );
     ''')
     conn.commit()
+    # Миграция, если таблица уже существовала без poker_koins
+    try:
+        cursor.execute('ALTER TABLE users ADD COLUMN poker_koins INTEGER DEFAULT 0')
+        conn.commit()
+    except:
+        pass
+    cursor.execute('INSERT OR IGNORE INTO poker_state (id, rate, last_update) VALUES (1, 0.001, ?)', (time.time(),))
+    conn.commit()
+    # Создание папок, если их нет
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    os.makedirs(os.path.join(IMAGES_DIR, 'tyan'), exist_ok=True)
+    os.makedirs(os.path.join(IMAGES_DIR, 'legs'), exist_ok=True)
+    os.makedirs(os.path.join(IMAGES_DIR, 'gort'), exist_ok=True)
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
 init_db()
 
-# ================= ФУНКЦИИ ДЛЯ НОВЫХ ТАБЛИЦ =================
-def log_command(user_id, command, args, chat_id):
-    cursor.execute('INSERT INTO command_logs (user_id, command, args, chat_id, timestamp) VALUES (?,?,?,?,?)',
-                   (user_id, command, ' '.join(args), chat_id, time.time()))
-    conn.commit()
-
-def get_command_logs(limit=20, since=None):
-    if since:
-        cursor.execute('SELECT user_id, command, args, chat_id, timestamp FROM command_logs WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?', (since, limit))
-    else:
-        cursor.execute('SELECT user_id, command, args, chat_id, timestamp FROM command_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
-    return cursor.fetchall()
-
-def is_command_banned(cmd):
-    cursor.execute('SELECT 1 FROM banned_commands WHERE command=?', (cmd,))
-    return cursor.fetchone() is not None
-
-def ban_command(cmd, banned_by):
-    cursor.execute('INSERT OR IGNORE INTO banned_commands (command, banned_by, banned_at) VALUES (?,?,?)', (cmd, banned_by, time.time()))
-    conn.commit()
-
-def unban_command(cmd):
-    cursor.execute('DELETE FROM banned_commands WHERE command=?', (cmd,))
-    conn.commit()
-
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+# ================= ФУНКЦИИ ДЛЯ РАБОТЫ С БД =================
 def db_get_user(user_id):
     cursor.execute('SELECT * FROM users WHERE user_id=?', (user_id,))
     return cursor.fetchone()
@@ -255,7 +241,7 @@ def get_user_api(user_id):
     try:
         session = vk_api.VkApi(token=row[1])
         api = session.get_api()
-        api.users.get(user_ids=user_id)
+        api.users.get(user_ids=user_id)  # проверка токена
         return api
     except:
         return None
@@ -344,14 +330,22 @@ def get_random_image(folder_path):
 
 def upload_photo_to_vk(peer_id, photo_path):
     try:
-        upload = vk.photos.getMessagesUploadServer(peer_id=peer_id)['upload_url']
-        with open(photo_path, 'rb') as f:
-            response = requests.post(upload, files={'photo': f}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        return f"photo{saved['owner_id']}_{saved['id']}"
+        photo = uploader.photo_messages(photo_path, peer_id=peer_id)[0]
+        return f"photo{photo['owner_id']}_{photo['id']}"
     except Exception as e:
         print(f"Ошибка загрузки фото: {e}")
         return None
+
+def upload_photo_bytes_to_vk(peer_id, photo_bytes, filename='photo.png'):
+    import tempfile
+    fd, tmp_path = tempfile.mkstemp(suffix='.png')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(photo_bytes)
+        return upload_photo_to_vk(peer_id, tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 def get_prefix(chat_id):
     cursor.execute('SELECT prefix FROM chat_prefixes WHERE chat_id=?', (chat_id,))
@@ -381,51 +375,109 @@ def generate_reg_code(role=0, uses=1, creator_id=None):
     conn.commit()
     return code
 
-# ================= МОДЕРАТОР =================
-def check_moderation(user_id, chat_id, message):
-    for word in BAD_WORDS:
-        if word.lower() in message.lower():
-            cursor.execute('INSERT INTO warnings (user_id, chat_id, count, last_warning_time) VALUES (?,?,1,?) ON CONFLICT(user_id, chat_id) DO UPDATE SET count=count+1, last_warning_time=?', (user_id, chat_id, time.time(), time.time()))
-            conn.commit()
-            cursor.execute('SELECT count FROM warnings WHERE user_id=? AND chat_id=?', (user_id, chat_id))
-            count = cursor.fetchone()[0]
-            if count >= 3:
-                expires = time.time() + 86400
-                cursor.execute('INSERT OR REPLACE INTO bans (user_id, reason, expires_at, banned_by) VALUES (?,?,?,?)', (user_id, 'Автоматический бан за мат (3 предупреждения)', expires, OWNER_ID))
-                conn.commit()
-                send_message(chat_id, f'⚠️ Пользователь {user_id} автоматически забанен за мат.')
-            else:
-                send_message(chat_id, f'⚠️ Предупреждение {count}/3. Не материтесь!')
-            break
-    row = db_get_user(user_id)
-    if row:
-        last_time = row[15]
-        if last_time and time.time() - last_time < 10:
-            cursor.execute('SELECT COUNT(*) FROM chat_history WHERE user_id=? AND chat_id=? AND timestamp > ?', (user_id, chat_id, time.time()-10))
-            cnt = cursor.fetchone()[0]
-            if cnt > 5:
-                expires = time.time() + 3600
-                cursor.execute('INSERT OR REPLACE INTO bans (user_id, reason, expires_at, banned_by) VALUES (?,?,?,?)', (user_id, 'Автоматический бан за спам', expires, OWNER_ID))
-                conn.commit()
-                send_message(chat_id, f'⚠️ Пользователь {user_id} автоматически забанен за спам.')
-        db_update_user(user_id, last_message_time=time.time())
+def log_command(user_id, command, args, chat_id):
+    cursor.execute('INSERT INTO command_logs (user_id, command, args, chat_id, timestamp) VALUES (?,?,?,?,?)',
+                   (user_id, command, ' '.join(args), chat_id, time.time()))
+    conn.commit()
 
-# ================= ФУНКЦИИ ДЛЯ РАССЫЛКИ =================
-def send_broadcast(message):
-    cursor.execute('SELECT user_id FROM users WHERE is_disabled=0')
-    users = cursor.fetchall()
-    for u in users:
+def get_command_logs(limit=20, since=None):
+    if since:
+        cursor.execute('SELECT user_id, command, args, chat_id, timestamp FROM command_logs WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?', (since, limit))
+    else:
+        cursor.execute('SELECT user_id, command, args, chat_id, timestamp FROM command_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
+    return cursor.fetchall()
+
+def is_command_banned(cmd):
+    cursor.execute('SELECT 1 FROM banned_commands WHERE command=?', (cmd,))
+    return cursor.fetchone() is not None
+
+def ban_command(cmd, banned_by):
+    cursor.execute('INSERT OR IGNORE INTO banned_commands (command, banned_by, banned_at) VALUES (?,?,?)', (cmd, banned_by, time.time()))
+    conn.commit()
+
+def unban_command(cmd):
+    cursor.execute('DELETE FROM banned_commands WHERE command=?', (cmd,))
+    conn.commit()
+
+def looks_like_token(s):
+    return isinstance(s, str) and len(s) > 80 and s.startswith('vk1.a.')
+
+def extract_user_id_from_link(link):
+    if not link:
+        return None
+    m = re.search(r'vk\.com/id(\d+)', link)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'vk\.com/([A-Za-z0-9_.]+)', link)
+    if m:
         try:
-            vk.messages.send(peer_id=u[0], message=message, random_id=get_random_id())
-            time.sleep(0.3)
+            resolved = vk.utils.resolveScreenName(screen_name=m.group(1))
+            if resolved and resolved.get('type') == 'user':
+                return int(resolved['object_id'])
         except:
-            continue
+            pass
+        try:
+            info = vk.users.get(user_ids=m.group(1))
+            if info:
+                return info[0]['id']
+        except:
+            pass
+    return None
 
-# ================= ФУНКЦИИ ДЛЯ КУРСОВ =================
+def get_all_mentioned_ids(event, args):
+    ids = []
+    reply = get_reply_message(event)
+    if reply:
+        ids.append(reply['from_id'])
+    text = event.text or ''
+    for m in re.finditer(r'\[id(\d+)\|', text):
+        ids.append(int(m.group(1)))
+    for m in re.finditer(r'@id(\d+)', text):
+        ids.append(int(m.group(1)))
+    for arg in args:
+        if 'vk.com/' in arg:
+            uid = extract_user_id_from_link(arg)
+            if uid:
+                ids.append(uid)
+    unique = []
+    for i in ids:
+        if i not in unique:
+            unique.append(i)
+    return unique
+
+# ================= ФУНКЦИИ GPT =================
+def ask_gpt(question, system_prompt="Вы - полезный ассистент в VK боте. Отвечайте кратко и по делу на русском языке."):
+    if GPT_API_KEY == 'ВАШ_КЛЮЧ_OPENAI_API':
+        return "❌ Ошибка: Не установлен API ключ GPT."
+    try:
+        headers = {"Authorization": f"Bearer {GPT_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": GPT_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
+            ],
+            "max_tokens": 500,
+            "temperature": 0.7
+        }
+        response = requests.post(GPT_API_URL, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        elif response.status_code == 401:
+            return "❌ Ошибка: Неверный API ключ"
+        elif response.status_code == 429:
+            return "❌ Ошибка: Превышен лимит запросов. Попробуйте позже."
+        else:
+            return f"❌ Ошибка API: {response.status_code} - {response.text[:200]}"
+    except requests.exceptions.Timeout:
+        return "❌ Ошибка: Время ожидания истекло."
+    except Exception as e:
+        return f"❌ Ошибка при обращении к GPT: {str(e)}"
+
+# ================= ФУНКЦИИ КУРСОВ ВАЛЮТ =================
 def get_exchange_rate(from_currency, to_currency='RUB'):
-    url = f"https://api.exchangerate-api.com/v4/latest/{from_currency}"
-    if EXCHANGE_API_KEY != 'ваш_ключ_exchangerate':
-        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/latest/{from_currency}"
+    url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/latest/{from_currency}"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -448,107 +500,30 @@ def get_crypto_price(symbol):
         pass
     return None
 
-# ================= ФУНКЦИИ ДЛЯ МЕМОВ =================
-def generate_meme(text_top, text_bottom):
-    template_path = get_random_image(TEMPLATES_DIR)
-    if not template_path:
-        return None
-    img = Image.open(template_path)
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", size=40)
-    except:
-        font = ImageFont.load_default()
-    img_w, img_h = img.size
-    if text_top:
-        draw.text((img_w/2, 20), text_top, fill='white', font=font, anchor='mt', stroke_width=2, stroke_fill='black')
-    if text_bottom:
-        draw.text((img_w/2, img_h-20), text_bottom, fill='white', font=font, anchor='mb', stroke_width=2, stroke_fill='black')
-    buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    buf.seek(0)
-    return buf
-
-# ================= ФУНКЦИЯ ДЛЯ КОСМЕТИКИ =================
-def generate_profile_card(user_id):
-    info = get_user_info(user_id)
-    if not info:
-        return None
-    name = f"{info['first_name']} {info['last_name']}"
-    avatar_url = info.get('photo_max_orig')
-    if avatar_url:
-        avatar_data = download_photo(avatar_url)
-        if avatar_data:
-            avatar = Image.open(io.BytesIO(avatar_data)).resize((200, 200))
-        else:
-            avatar = None
-    else:
-        avatar = None
-    card = Image.new('RGB', (600, 400), color=(30, 30, 40))
-    draw = ImageDraw.Draw(card)
-    try:
-        font_big = ImageFont.truetype("arial.ttf", size=28)
-        font_small = ImageFont.truetype("arial.ttf", size=18)
-    except:
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-    draw.rectangle([10, 10, 590, 390], outline=(100, 100, 200), width=3)
-    if avatar:
-        card.paste(avatar, (30, 30))
-    else:
-        draw.ellipse([30, 30, 230, 230], outline=(200, 200, 200), width=2)
-    row = db_get_user(user_id)
+# ================= POKER KOIN =================
+def get_poker_rate():
+    cursor.execute('SELECT rate, last_update FROM poker_state WHERE id=1')
+    row = cursor.fetchone()
     if row:
-        btc = row[3]
-        dof = row[4]
-        stars = row[11]
-        role_names = {0: 'Участник', 1: 'Элита', 2: 'Князь', 3: 'Император', 4: 'Админ', 5: 'Создатель'}
-        role = role_names.get(row[2], 'Неизвестно')
-        herzog = '👑 Да' if row[5] else ('⏳ Временно' if row[15] > time.time() else '❌ Нет')
-        protection = '🛡️ Да' if row[6] else '❌ Нет'
-    else:
-        btc = dof = stars = 0
-        role = 'Не зарегистрирован'
-        herzog = protection = '❌'
-    clan_id = get_clan_by_user(user_id)
-    if clan_id:
-        clan_info = get_clan_info(clan_id)
-        clan_name = clan_info[1] if clan_info else 'Без клана'
-    else:
-        clan_name = 'Без клана'
-    draw.text((260, 40), name, fill=(255, 255, 255), font=font_big)
-    draw.text((260, 90), f"Роль: {role}", fill=(200, 200, 200), font=font_small)
-    draw.text((260, 130), f"💰 БТС: {btc}", fill=(255, 215, 0), font=font_small)
-    draw.text((260, 170), f"🧪 Дофамин: {dof}", fill=(0, 255, 255), font=font_small)
-    draw.text((260, 210), f"⭐ Звёзды: {stars}", fill=(255, 255, 0), font=font_small)
-    draw.text((260, 250), f"Герцог: {herzog}", fill=(255, 200, 150), font=font_small)
-    draw.text((260, 290), f"Защита: {protection}", fill=(150, 255, 150), font=font_small)
-    draw.text((260, 330), f"Клан: {clan_name}", fill=(200, 200, 255), font=font_small)
-    buf = io.BytesIO()
-    card.save(buf, format='PNG')
-    buf.seek(0)
-    return buf
+        rate, last_update = row
+        if time.time() - last_update > 3600:
+            update_poker_rate()
+            cursor.execute('SELECT rate FROM poker_state WHERE id=1')
+            rate = cursor.fetchone()[0]
+        return rate
+    return 0.001
 
-# ================= ПЛАНИРОВЩИК =================
-def birthday_checker():
-    today_birthdays = get_today_birthdays()
-    for user_id, chat_id in today_birthdays:
-        try:
-            user_info = get_user_info(user_id)
-            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(user_id)
-            send_message(chat_id, f"🎉 Сегодня день рождения у {name}! Поздравляем! 🎂")
-        except:
-            pass
+def update_poker_rate():
+    cursor.execute('SELECT rate FROM poker_state WHERE id=1')
+    row = cursor.fetchone()
+    old = row[0] if row else 0.001
+    change = random.uniform(-0.1, 0.1)
+    new_rate = max(0.00001, old * (1 + change))
+    cursor.execute('UPDATE poker_state SET rate=?, last_update=? WHERE id=1', (new_rate, time.time()))
+    conn.commit()
+    return new_rate
 
-def run_scheduler():
-    while True:
-        birthday_checker()
-        time.sleep(3600)
-
-scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-scheduler_thread.start()
-
-# ================= КОМАНДЫ КЛАНОВ =================
+# ================= КЛАНЫ =================
 def add_clan(name, leader_id):
     cursor.execute('INSERT INTO clans (name, leader_id, created_at) VALUES (?,?,?)', (name, leader_id, time.time()))
     conn.commit()
@@ -586,6 +561,76 @@ def update_clan_balance(clan_id, btc_add=0, dof_add=0):
     cursor.execute('UPDATE clans SET balance_btc = balance_btc + ?, balance_dofamin = balance_dofamin + ? WHERE id=?', (btc_add, dof_add, clan_id))
     conn.commit()
 
+# ================= СЕМЬИ =================
+def create_family(name, leader_id):
+    if get_family_by_user(leader_id):
+        return None
+    cursor.execute('INSERT INTO families (name, leader_id, created_at) VALUES (?,?,?)', (name, leader_id, time.time()))
+    conn.commit()
+    fid = cursor.lastrowid
+    cursor.execute('INSERT INTO family_members (family_id, user_id, role) VALUES (?,?,?)', (fid, leader_id, 'leader'))
+    conn.commit()
+    return fid
+
+def get_family_by_user(user_id):
+    cursor.execute('SELECT family_id FROM family_members WHERE user_id=?', (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+def get_family_info(fid):
+    cursor.execute('SELECT * FROM families WHERE id=?', (fid,))
+    return cursor.fetchone()
+
+def get_family_members(fid):
+    cursor.execute('SELECT user_id, role FROM family_members WHERE family_id=?', (fid,))
+    return cursor.fetchall()
+
+def join_family(user_id, fid):
+    members = get_family_members(fid)
+    if len(members) >= 6:
+        return False
+    cursor.execute('INSERT OR IGNORE INTO family_members (family_id, user_id, role) VALUES (?,?,?)', (fid, user_id, 'member'))
+    conn.commit()
+    return True
+
+def leave_family(user_id):
+    cursor.execute('DELETE FROM family_members WHERE user_id=?', (user_id,))
+    conn.commit()
+
+def delete_family(fid):
+    cursor.execute('DELETE FROM families WHERE id=?', (fid,))
+    cursor.execute('DELETE FROM family_members WHERE family_id=?', (fid,))
+    conn.commit()
+
+def get_all_families():
+    cursor.execute('SELECT id, name, leader_id, balance_btc, balance_dofamin FROM families')
+    return cursor.fetchall()
+
+def update_family_balance(fid, btc=0, dof=0):
+    cursor.execute('UPDATE families SET balance_btc = balance_btc + ?, balance_dofamin = balance_dofamin + ? WHERE id=?', (btc, dof, fid))
+    conn.commit()
+
+# ================= БРАКИ =================
+def create_marriage(u1, u2):
+    if get_marriage(u1) or get_marriage(u2):
+        return False
+    cursor.execute('INSERT INTO marriages (user1, user2, created_at) VALUES (?,?,?)', (u1, u2, time.time()))
+    conn.commit()
+    return True
+
+def get_marriage(user_id):
+    cursor.execute('SELECT * FROM marriages WHERE user1=? OR user2=?', (user_id, user_id))
+    return cursor.fetchone()
+
+def delete_marriage(user_id):
+    cursor.execute('DELETE FROM marriages WHERE user1=? OR user2=?', (user_id, user_id))
+    conn.commit()
+
+def delete_marriage_pair(u1, u2):
+    cursor.execute('DELETE FROM marriages WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)', (u1, u2, u2, u1))
+    conn.commit()
+
+# ================= ДНИ РОЖДЕНИЯ =================
 def get_birthday(user_id):
     cursor.execute('SELECT birth_date, chat_id FROM birthdays WHERE user_id=?', (user_id,))
     return cursor.fetchone()
@@ -599,6 +644,7 @@ def get_today_birthdays():
     cursor.execute('SELECT user_id, chat_id FROM birthdays WHERE birth_date=?', (today,))
     return cursor.fetchall()
 
+# ================= ИСТОРИЯ ЧАТА =================
 def save_chat_message(chat_id, user_id, message):
     cursor.execute('INSERT INTO chat_history (chat_id, user_id, message, timestamp) VALUES (?,?,?,?)', (chat_id, user_id, message, time.time()))
     conn.commit()
@@ -609,7 +655,197 @@ def search_chat_history(chat_id, query):
     cursor.execute('SELECT user_id, message, timestamp FROM chat_history WHERE chat_id=? AND message LIKE ? ORDER BY timestamp DESC LIMIT 10', (chat_id, f'%{query}%'))
     return cursor.fetchall()
 
-# ================= ОСНОВНОЙ ОБРАБОТЧИК =================
+# ================= МОДЕРАЦИЯ =================
+def check_moderation(user_id, chat_id, message):
+    for word in BAD_WORDS:
+        if word.lower() in message.lower():
+            cursor.execute('INSERT INTO warnings (user_id, chat_id, count, last_warning_time) VALUES (?,?,1,?) ON CONFLICT(user_id, chat_id) DO UPDATE SET count=count+1, last_warning_time=?', (user_id, chat_id, time.time(), time.time()))
+            conn.commit()
+            cursor.execute('SELECT count FROM warnings WHERE user_id=? AND chat_id=?', (user_id, chat_id))
+            count = cursor.fetchone()[0]
+            if count >= 3:
+                expires = time.time() + 86400
+                cursor.execute('INSERT OR REPLACE INTO bans (user_id, reason, expires_at, banned_by) VALUES (?,?,?,?)', (user_id, 'Автоматический бан за мат (3 предупреждения)', expires, OWNER_ID))
+                conn.commit()
+                send_message(chat_id, f'⚠️ Пользователь {user_id} автоматически забанен за мат.')
+            else:
+                send_message(chat_id, f'⚠️ Предупреждение {count}/3. Не материтесь!')
+            break
+    row = db_get_user(user_id)
+    if row:
+        last_time = row[16]  # last_message_time
+        if last_time and time.time() - last_time < 10:
+            cursor.execute('SELECT COUNT(*) FROM chat_history WHERE user_id=? AND chat_id=? AND timestamp > ?', (user_id, chat_id, time.time()-10))
+            cnt = cursor.fetchone()[0]
+            if cnt > 5:
+                expires = time.time() + 3600
+                cursor.execute('INSERT OR REPLACE INTO bans (user_id, reason, expires_at, banned_by) VALUES (?,?,?,?)', (user_id, 'Автоматический бан за спам', expires, OWNER_ID))
+                conn.commit()
+                send_message(chat_id, f'⚠️ Пользователь {user_id} автоматически забанен за спам.')
+        db_update_user(user_id, last_message_time=time.time())
+
+# ================= ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ =================
+def generate_meme(text_top, text_bottom):
+    template_path = get_random_image(TEMPLATES_DIR)
+    if not template_path:
+        return None
+    img = Image.open(template_path)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", size=40)
+    except:
+        font = ImageFont.load_default()
+    img_w, img_h = img.size
+    if text_top:
+        draw.text((img_w/2, 20), text_top, fill='white', font=font, anchor='mt', stroke_width=2, stroke_fill='black')
+    if text_bottom:
+        draw.text((img_w/2, img_h-20), text_bottom, fill='white', font=font, anchor='mb', stroke_width=2, stroke_fill='black')
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+def generate_profile_card(user_id):
+    info = get_user_info(user_id)
+    if not info:
+        return None
+    name = f"{info['first_name']} {info['last_name']}"
+    avatar_url = info.get('photo_max_orig')
+    avatar = None
+    if avatar_url:
+        avatar_data = download_photo(avatar_url)
+        if avatar_data:
+            avatar = Image.open(io.BytesIO(avatar_data)).resize((200, 200))
+    card = Image.new('RGB', (600, 400), color=(30, 30, 40))
+    draw = ImageDraw.Draw(card)
+    try:
+        font_big = ImageFont.truetype("arial.ttf", size=28)
+        font_small = ImageFont.truetype("arial.ttf", size=18)
+    except:
+        font_big = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    draw.rectangle([10, 10, 590, 390], outline=(100, 100, 200), width=3)
+    if avatar:
+        card.paste(avatar, (30, 30))
+    else:
+        draw.ellipse([30, 30, 230, 230], outline=(200, 200, 200), width=2)
+    row = db_get_user(user_id)
+    role_names = {0: 'Участник', 1: 'Элита', 2: 'Князь', 3: 'Император', 4: 'Админ', 5: 'Создатель'}
+    if row:
+        btc = row[3]
+        dof = row[4]
+        stars = row[11]
+        poker = row[20]
+        role = role_names.get(row[2], 'Неизвестно')
+        herzog = '👑 Да' if row[5] else ('⏳ Временно' if row[15] > time.time() else '❌ Нет')
+        protection = '🛡️ Да' if row[6] else '❌ Нет'
+        reg_ts = row[7]
+        reg_str = datetime.datetime.fromtimestamp(reg_ts).strftime('%d.%m.%Y') if reg_ts else '—'
+    else:
+        btc = dof = stars = poker = 0
+        role = 'Не зарегистрирован'
+        herzog = protection = '❌'
+        reg_str = '—'
+    clan_id = get_clan_by_user(user_id)
+    clan_name = 'Без клана'
+    if clan_id:
+        clan_info = get_clan_info(clan_id)
+        clan_name = clan_info[1] if clan_info else 'Без клана'
+    marriage = get_marriage(user_id)
+    partner_name = 'Нет'
+    if marriage:
+        partner_id = marriage[1] if marriage[1] != user_id else marriage[2]
+        p_info = get_user_info(partner_id)
+        partner_name = f"{p_info['first_name']} {p_info['last_name']}" if p_info else str(partner_id)
+    family_id = get_family_by_user(user_id)
+    family_name = 'Нет'
+    if family_id:
+        fi = get_family_info(family_id)
+        family_name = fi[1] if fi else 'Нет'
+
+    draw.text((260, 40), name, fill=(255, 255, 255), font=font_big)
+    draw.text((260, 90), f"Роль: {role}", fill=(200, 200, 200), font=font_small)
+    draw.text((260, 130), f"💰 БТС: {btc}", fill=(255, 215, 0), font=font_small)
+    draw.text((260, 170), f"🧪 Дофамин: {dof}", fill=(0, 255, 255), font=font_small)
+    draw.text((260, 210), f"⭐ Звёзды: {stars}", fill=(255, 255, 0), font=font_small)
+    draw.text((260, 250), f"🪙 PKR: {poker}", fill=(255, 200, 50), font=font_small)
+    draw.text((260, 290), f"Герцог: {herzog}", fill=(255, 200, 150), font=font_small)
+    draw.text((260, 330), f"Защита: {protection}", fill=(150, 255, 150), font=font_small)
+    draw.text((260, 370), f"Клан: {clan_name}", fill=(200, 200, 255), font=font_small)
+    draw.text((30, 250), f"Семья: {family_name}", fill=(200, 200, 255), font=font_small)
+    draw.text((30, 290), f"Брак: {partner_name}", fill=(255, 180, 180), font=font_small)
+    draw.text((30, 330), f"Регистрация: {reg_str}", fill=(150, 150, 150), font=font_small)
+    buf = io.BytesIO()
+    card.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+def generate_quote_image(text):
+    img = Image.new('RGB', (800, 400), color=(20, 20, 20))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", size=32)
+    except:
+        font = ImageFont.load_default()
+    lines = textwrap.wrap(text, width=35)
+    y = 50
+    for line in lines:
+        draw.text((400, y), line, fill=(255, 255, 255), font=font, anchor='mm')
+        y += 40
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+def generate_demotivator(text):
+    img = Image.new('RGB', (600, 400), color=(0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", size=40)
+        small_font = ImageFont.truetype("arial.ttf", size=20)
+    except:
+        font = ImageFont.load_default()
+        small_font = ImageFont.load_default()
+    draw.rectangle([10, 10, 590, 390], outline=(255, 255, 255), width=3)
+    draw.text((300, 150), text, fill=(255, 0, 0), font=font, anchor='mm')
+    draw.text((300, 350), "Демотиватор", fill=(255, 255, 255), font=small_font, anchor='mm')
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+# ================= ПЛАНИРОВЩИК =================
+def birthday_checker():
+    today_birthdays = get_today_birthdays()
+    for user_id, chat_id in today_birthdays:
+        try:
+            user_info = get_user_info(user_id)
+            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(user_id)
+            send_message(chat_id, f"🎉 Сегодня день рождения у {name}! Поздравляем! 🎂")
+        except:
+            pass
+
+def run_scheduler():
+    while True:
+        update_poker_rate()
+        birthday_checker()
+        time.sleep(3600)
+
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
+
+# ================= ФУНКЦИЯ РАССЫЛКИ =================
+def send_broadcast(message):
+    cursor.execute('SELECT user_id FROM users WHERE is_disabled=0')
+    users = cursor.fetchall()
+    for u in users:
+        try:
+            vk.messages.send(peer_id=u[0], message=message, random_id=get_random_id())
+            time.sleep(0.3)
+        except:
+            continue
+
+# ================= ОБРАБОТЧИК КОМАНД =================
 def process_command(event):
     if not event.text:
         return
@@ -637,26 +873,38 @@ def process_command(event):
             db_create_user(user_id)
         elif command == 'reg':
             if len(args) >= 1:
-                reg_code = args[0]
-                cursor.execute('SELECT role, uses FROM reg_codes WHERE code=?', (reg_code,))
-                code_row = cursor.fetchone()
-                if code_row:
-                    role = code_row[0]
-                    uses = code_row[1]
-                    db_create_user(user_id)
-                    if user_id not in ADMIN_IDS:
-                        db_update_user(user_id, role=role)
-                    if uses > 1:
-                        cursor.execute('UPDATE reg_codes SET uses=? WHERE code=?', (uses-1, reg_code))
-                        conn.commit()
-                    else:
-                        cursor.execute('DELETE FROM reg_codes WHERE code=?', (reg_code,))
-                        conn.commit()
-                    send_message(event.peer_id, f"✅ Регистрация прошла успешно! Ваша роль: {role}")
+                first = args[0]
+                if looks_like_token(first):
+                    try:
+                        session = vk_api.VkApi(token=first)
+                        api = session.get_api()
+                        api.users.get(user_ids=user_id)  # проверка токена
+                        db_create_user(user_id, access_token=first)
+                        send_message(event.peer_id, "✅ Регистрация с токеном успешна. Теперь бот будет работать от вашего аккаунта.")
+                    except Exception as e:
+                        send_message(event.peer_id, f"❌ Токен невалиден: {e}")
+                    return
                 else:
-                    send_message(event.peer_id, "❌ Неверный код регистрации.")
+                    reg_code = first
+                    cursor.execute('SELECT role, uses FROM reg_codes WHERE code=?', (reg_code,))
+                    code_row = cursor.fetchone()
+                    if code_row:
+                        role = code_row[0]
+                        uses = code_row[1]
+                        db_create_user(user_id)
+                        if user_id not in ADMIN_IDS:
+                            db_update_user(user_id, role=role)
+                        if uses > 1:
+                            cursor.execute('UPDATE reg_codes SET uses=? WHERE code=?', (uses-1, reg_code))
+                            conn.commit()
+                        else:
+                            cursor.execute('DELETE FROM reg_codes WHERE code=?', (reg_code,))
+                            conn.commit()
+                        send_message(event.peer_id, f"✅ Регистрация прошла успешно! Ваша роль: {role}")
+                    else:
+                        send_message(event.peer_id, "❌ Неверный код регистрации.")
             else:
-                send_message(event.peer_id, "Использование: /reg (код)")
+                send_message(event.peer_id, "Использование: /reg (токен) или /reg (код)")
             return
         else:
             return
@@ -748,7 +996,7 @@ def process_command(event):
 
 🆕 Новые команды:
 🪙 /монетка — подбросить монетку
-📈 /курс USD (или EUR, BTC) — курс валюты
+📈 /курс USD (или EUR, BTC, PKR) — курс валюты
 🎬 /мем (верхний текст) (нижний текст) — создать мем
 🔍 /поиск (текст) — поиск в истории беседы
 🏛️ /кланы создать (название) — создать клан
@@ -761,6 +1009,22 @@ def process_command(event):
 🚫 /запрет (команда) — запретить команду (только Создатель)
 ✅ /разрешить (команда) — разрешить команду (только Создатель)
 🎨 /косметика — красивый профиль
+
+👨‍👩‍👧‍👦 /семья (создать|вступить|выйти|список|инфо|пополнить) — семьи
+💍 /жениться (ссылка/ответ) — вступить в брак
+💔 /развестись — развестись
+🔗 /свести (юзер1) (юзер2) — свести двух пользователей (Админ+)
+💔 /развести (юзер1) (юзер2) — развести (Админ+)
+🗑️ /удалитьсемью (создатель семьи) — удалить семью (Админ+)
+🗑️ /удалитьклан (лидер клана) — удалить клан (Админ+)
+
+🪙 Poker Koin:
+/коин — баланс PKR
+/купитькоин (кол-во) — купить PKR за BTC
+/продатькоин (кол-во) — продать PKR за BTC
+/+koin (кол-во) (ссылка/ответ) — выдать PKR (Админ+)
+/-koin (кол-во) (ссылка/ответ) — забрать PKR (Админ+)
+/alldelkoin — обнулить все PKR (Создатель)
 
 🔧 Команды разработчика (Админ+):
 🔄 /restart — перезапустить бота
@@ -778,14 +1042,13 @@ def process_command(event):
 """
         send_message(event.peer_id, help_text)
 
-    # ===== НОВЫЕ КОМАНДЫ =====
     elif command == 'монетка':
         result = random.choice(['Орёл', 'Решка'])
         send_message(event.peer_id, f"🪙 Монетка подброшена! Выпал: **{result}**")
 
     elif command == 'курс':
         if not args:
-            send_message(event.peer_id, "Использование: /курс USD (или EUR, BTC)")
+            send_message(event.peer_id, "Использование: /курс USD (или EUR, BTC, PKR)")
             return
         currency = args[0].upper()
         if currency == 'BTC':
@@ -794,12 +1057,15 @@ def process_command(event):
                 send_message(event.peer_id, f"💰 1 BTC = {price:.2f} RUB")
             else:
                 send_message(event.peer_id, "❌ Не удалось получить курс биткоина.")
+        elif currency == 'PKR':
+            rate = get_poker_rate()
+            send_message(event.peer_id, f"🪙 1 PKR = {rate:.6f} BTC")
         else:
             rate = get_exchange_rate(currency, 'RUB')
             if rate:
                 send_message(event.peer_id, f"💰 1 {currency} = {rate:.2f} RUB")
             else:
-                send_message(event.peer_id, "❌ Не удалось получить курс. Проверьте валюту.")
+                send_message(event.peer_id, "❌ Не удалось получить курс.")
 
     elif command == 'мем':
         if len(args) < 2:
@@ -811,11 +1077,11 @@ def process_command(event):
         if not buf:
             send_message(event.peer_id, "❌ Нет шаблонов для мемов. Создайте папку templates и добавьте изображения.")
             return
-        upload = vk.photos.getMessagesUploadServer(peer_id=event.peer_id)['upload_url']
-        response = requests.post(upload, files={'photo': ('meme.png', buf, 'image/png')}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        attachment = f"photo{saved['owner_id']}_{saved['id']}"
-        send_message(event.peer_id, attachment=attachment)
+        attachment = upload_photo_bytes_to_vk(event.peer_id, buf.getvalue(), 'meme.png')
+        if attachment:
+            send_message(event.peer_id, attachment=attachment)
+        else:
+            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
 
     elif command == 'поиск':
         if not args:
@@ -827,9 +1093,9 @@ def process_command(event):
             send_message(event.peer_id, "Ничего не найдено.")
             return
         msg = "🔍 Результаты поиска:\n"
-        for user_id, message, ts in results:
-            user_info = get_user_info(user_id)
-            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(user_id)
+        for uid, message, ts in results:
+            user_info = get_user_info(uid)
+            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(uid)
             time_str = datetime.datetime.fromtimestamp(ts).strftime('%H:%M')
             msg += f"{time_str} {name}: {message[:50]}...\n"
         send_message(event.peer_id, msg)
@@ -854,7 +1120,7 @@ def process_command(event):
             send_message(event.peer_id, "❌ Неверный формат. Используйте ДД.ММ")
             return
         set_birthday(user_id, date, chat_id)
-        send_message(event.peer_id, f"✅ Дата рождения сохранена: {date}. В этот день я поздравлю вас!")
+        send_message(event.peer_id, f"✅ Дата рождения сохранена: {date}.")
 
     elif command == 'кланы':
         if not args:
@@ -871,7 +1137,7 @@ def process_command(event):
                 send_message(event.peer_id, "❌ Клан с таким названием уже существует.")
                 return
             if get_clan_by_user(user_id):
-                send_message(event.peer_id, "❌ Вы уже состоите в клане. Выйдите сначала.")
+                send_message(event.peer_id, "❌ Вы уже состоите в клане.")
                 return
             clan_id = add_clan(name, user_id)
             send_message(event.peer_id, f"✅ Клан '{name}' создан! Вы лидер.")
@@ -933,79 +1199,237 @@ def process_command(event):
             update_clan_balance(clan_id, btc_add=amount)
             send_message(event.peer_id, f"✅ Вы пополнили клан на {amount} БТС.")
         else:
-            send_message(event.peer_id, "Неизвестная подкоманда. Доступно: создать, вступить, список, топ, пополнить.")
+            send_message(event.peer_id, "Неизвестная подкоманда.")
 
-    elif command == 'логи':
+    elif command == 'семья':
+        if not args:
+            send_message(event.peer_id, "Использование: /семья (создать|вступить|выйти|список|инфо|пополнить)")
+            return
+        sub = args[0].lower()
+        if sub == 'создать':
+            if len(args) < 2:
+                send_message(event.peer_id, "Укажите название семьи.")
+                return
+            name = ' '.join(args[1:])
+            if get_family_by_user(user_id):
+                send_message(event.peer_id, "Вы уже в семье.")
+                return
+            fid = create_family(name, user_id)
+            if fid:
+                send_message(event.peer_id, f"✅ Семья '{name}' создана!")
+            else:
+                send_message(event.peer_id, "❌ Ошибка: вы уже состоите в семье.")
+        elif sub == 'вступить':
+            if len(args) < 2:
+                send_message(event.peer_id, "Укажите название семьи.")
+                return
+            name = ' '.join(args[1:])
+            cursor.execute('SELECT id FROM families WHERE name=?', (name,))
+            row = cursor.fetchone()
+            if not row:
+                send_message(event.peer_id, "Семья не найдена.")
+                return
+            if get_family_by_user(user_id):
+                send_message(event.peer_id, "Вы уже в семье.")
+                return
+            if not join_family(user_id, row[0]):
+                send_message(event.peer_id, "Семья заполнена (максимум 6).")
+                return
+            send_message(event.peer_id, f"Вы вступили в семью '{name}'.")
+        elif sub == 'выйти':
+            leave_family(user_id)
+            send_message(event.peer_id, "Вы вышли из семьи.")
+        elif sub == 'список':
+            families = get_all_families()
+            if not families:
+                send_message(event.peer_id, "Нет семей.")
+                return
+            msg = "👨‍👩‍👧‍👦 Семьи:\n"
+            for f in families:
+                msg += f"• {f[1]} (лидер: {f[2]}, BTC: {f[3]}, Допамин: {f[4]})\n"
+            send_message(event.peer_id, msg)
+        elif sub == 'инфо':
+            fid = get_family_by_user(user_id)
+            if not fid:
+                send_message(event.peer_id, "Вы не в семье.")
+                return
+            info = get_family_info(fid)
+            members = get_family_members(fid)
+            msg = f"Семья: {info[1]}\nБаланс BTC: {info[3]}\nБаланс допамин: {info[4]}\nУчастники:\n"
+            for uid, role in members:
+                uinfo = get_user_info(uid)
+                name = f"{uinfo['first_name']} {uinfo['last_name']}" if uinfo else str(uid)
+                msg += f"• {name} ({role})\n"
+            send_message(event.peer_id, msg)
+        elif sub == 'пополнить':
+            fid = get_family_by_user(user_id)
+            if not fid:
+                send_message(event.peer_id, "Вы не в семье.")
+                return
+            if len(args) < 2:
+                send_message(event.peer_id, "Укажите сумму BTC.")
+                return
+            try:
+                amount = int(args[1])
+            except:
+                send_message(event.peer_id, "Неверная сумма.")
+                return
+            row = db_get_user(user_id)
+            if row[3] < amount:
+                send_message(event.peer_id, "Недостаточно BTC.")
+                return
+            db_update_user(user_id, btc=row[3]-amount)
+            update_family_balance(fid, btc=amount)
+            send_message(event.peer_id, f"Вы пополнили семью на {amount} BTC.")
+
+    elif command == 'жениться':
+        target_id, _ = get_target_and_clean_args(event, args)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя ответом или ссылкой.")
+            return
+        if target_id == user_id:
+            send_message(event.peer_id, "Нельзя жениться на себе.")
+            return
+        if get_marriage(user_id) or get_marriage(target_id):
+            send_message(event.peer_id, "Кто-то уже состоит в браке.")
+            return
+        create_marriage(user_id, target_id)
+        send_message(event.peer_id, f"💍 Вы теперь в браке с пользователем {target_id}!")
+
+    elif command == 'развестись':
+        if not get_marriage(user_id):
+            send_message(event.peer_id, "Вы не в браке.")
+            return
+        delete_marriage(user_id)
+        send_message(event.peer_id, "Вы развелись.")
+
+    elif command == 'свести':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только админ.")
+            return
+        ids = get_all_mentioned_ids(event, args)
+        if len(ids) < 2:
+            send_message(event.peer_id, "Использование: /свести (юзер1) (юзер2)")
+            return
+        u1, u2 = ids[0], ids[1]
+        if get_marriage(u1) or get_marriage(u2):
+            send_message(event.peer_id, "Один из них уже в браке.")
+            return
+        create_marriage(u1, u2)
+        send_message(event.peer_id, f"💍 Пользователи {u1} и {u2} сведены.")
+
+    elif command == 'развести':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Только админ.")
+            return
+        ids = get_all_mentioned_ids(event, args)
+        if len(ids) >= 2:
+            delete_marriage_pair(ids[0], ids[1])
+            send_message(event.peer_id, f"Брак между {ids[0]} и {ids[1]} расторгнут.")
+        elif len(ids) == 1:
+            delete_marriage(ids[0])
+            send_message(event.peer_id, f"Брак пользователя {ids[0]} расторгнут.")
+        else:
+            send_message(event.peer_id, "Укажите одного или двух пользователей.")
+
+    elif command == 'коин':
+        row = db_get_user(user_id)
+        if not row:
+            send_message(event.peer_id, "❌ Вы не зарегистрированы.")
+            return
+        rate = get_poker_rate()
+        send_message(event.peer_id, f"🪙 Poker Koin\nКурс: 1 PKR = {rate:.6f} BTC\nВаш баланс: {row[20]} PKR\n\nКупить: /купитькоин (кол-во)\nПродать: /продатькоин (кол-во)")
+
+    elif command == 'купитькоин':
+        if len(args) < 1:
+            send_message(event.peer_id, "Использование: /купитькоин (кол-во)")
+            return
+        try:
+            amount = int(args[0])
+            if amount <= 0:
+                raise ValueError
+        except:
+            send_message(event.peer_id, "❌ Неверное количество.")
+            return
+        row = db_get_user(user_id)
+        rate = get_poker_rate()
+        cost = amount * rate
+        if row[3] < cost:
+            send_message(event.peer_id, f"❌ Недостаточно BTC. Нужно {cost:.6f} BTC.")
+            return
+        db_update_user(user_id, btc=row[3]-cost, poker_koins=row[20]+amount)
+        send_message(event.peer_id, f"✅ Вы купили {amount} PKR за {cost:.6f} BTC.")
+
+    elif command == 'продатькоин':
+        if len(args) < 1:
+            send_message(event.peer_id, "Использование: /продатькоин (кол-во)")
+            return
+        try:
+            amount = int(args[0])
+            if amount <= 0:
+                raise ValueError
+        except:
+            send_message(event.peer_id, "❌ Неверное количество.")
+            return
+        row = db_get_user(user_id)
+        if row[20] < amount:
+            send_message(event.peer_id, "❌ Недостаточно PKR.")
+            return
+        rate = get_poker_rate()
+        revenue = amount * rate
+        db_update_user(user_id, poker_koins=row[20]-amount, btc=row[3]+revenue)
+        send_message(event.peer_id, f"✅ Вы продали {amount} PKR за {revenue:.6f} BTC.")
+
+    elif command == '+koin':
         if not is_admin(user_id):
             send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        limit = 20
-        since = None
-        if args:
-            try:
-                hours = float(args[0])
-                since = time.time() - hours * 3600
-                limit = 100
-            except:
-                limit = 20
-        logs = get_command_logs(limit=limit, since=since)
-        if not logs:
-            send_message(event.peer_id, "Нет записей.")
+        target_id, clean_args = get_target_and_clean_args(event, args)
+        if target_id is None:
+            target_id = user_id
+        if not clean_args:
+            send_message(event.peer_id, "Использование: /+koin (кол-во) (ссылка/ответ)")
             return
-        msg = "📋 Последние команды:\n"
-        for user_id, cmd, args_str, cid, ts in logs:
-            time_str = datetime.datetime.fromtimestamp(ts).strftime('%d.%m %H:%M')
-            user_info = get_user_info(user_id)
-            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(user_id)
-            msg += f"{time_str} {name}: /{cmd} {args_str[:30]}\n"
-            if len(msg) > 3500:
-                send_message(event.peer_id, msg)
-                msg = ""
-        if msg:
-            send_message(event.peer_id, msg)
+        try:
+            amount = int(clean_args[0])
+            if amount <= 0:
+                raise ValueError
+        except:
+            send_message(event.peer_id, "❌ Неверное количество.")
+            return
+        db_create_user(target_id)
+        row = db_get_user(target_id)
+        db_update_user(target_id, poker_koins=row[20]+amount)
+        send_message(event.peer_id, f"✅ Выдано {amount} PKR пользователю {target_id}.")
 
-    elif command == 'запрет':
+    elif command == '-koin':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id, clean_args = get_target_and_clean_args(event, args)
+        if target_id is None:
+            target_id = user_id
+        if not clean_args:
+            send_message(event.peer_id, "Использование: /-koin (кол-во) (ссылка/ответ)")
+            return
+        try:
+            amount = int(clean_args[0])
+        except:
+            send_message(event.peer_id, "❌ Неверное количество.")
+            return
+        db_create_user(target_id)
+        row = db_get_user(target_id)
+        db_update_user(target_id, poker_koins=max(0, row[20]-amount))
+        send_message(event.peer_id, f"✅ Списано {amount} PKR у пользователя {target_id}.")
+
+    elif command == 'alldelkoin':
         if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может запрещать команды.")
+            send_message(event.peer_id, "⛔ Только создатель.")
             return
-        if not args:
-            send_message(event.peer_id, "Использование: /запрет (команда)")
-            return
-        cmd = args[0].lower()
-        if is_command_banned(cmd):
-            send_message(event.peer_id, f"❌ Команда '{cmd}' уже запрещена.")
-            return
-        ban_command(cmd, user_id)
-        send_message(event.peer_id, f"✅ Команда '{cmd}' запрещена.")
+        cursor.execute('UPDATE users SET poker_koins=0')
+        conn.commit()
+        send_message(event.peer_id, "✅ Все PKR обнулены.")
 
-    elif command == 'разрешить':
-        if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель может разрешать команды.")
-            return
-        if not args:
-            send_message(event.peer_id, "Использование: /разрешить (команда)")
-            return
-        cmd = args[0].lower()
-        if not is_command_banned(cmd):
-            send_message(event.peer_id, f"❌ Команда '{cmd}' не запрещена.")
-            return
-        unban_command(cmd)
-        send_message(event.peer_id, f"✅ Команда '{cmd}' разрешена.")
-
-    elif command == 'косметика':
-        target_id, _ = get_target_and_clean_args(event, args)
-        target_id = target_id or user_id
-        buf = generate_profile_card(target_id)
-        if not buf:
-            send_message(event.peer_id, "❌ Не удалось создать карточку.")
-            return
-        upload = vk.photos.getMessagesUploadServer(peer_id=event.peer_id)['upload_url']
-        response = requests.post(upload, files={'photo': ('profile.png', buf, 'image/png')}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        attachment = f"photo{saved['owner_id']}_{saved['id']}"
-        send_message(event.peer_id, "🎨 Ваш красивый профиль:", attachment=attachment)
-
-    # ====================== СТАРЫЕ КОМАНДЫ ======================
     elif command == 'dox':
         target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
@@ -1076,15 +1500,30 @@ def process_command(event):
             clan_info = get_clan_info(clan_id)
             if clan_info:
                 clan_name = clan_info[1]
+        family_id = get_family_by_user(target_id)
+        family_name = 'Без семьи'
+        if family_id:
+            fi = get_family_info(family_id)
+            if fi:
+                family_name = fi[1]
+        marriage = get_marriage(target_id)
+        partner = 'Нет'
+        if marriage:
+            partner_id = marriage[1] if marriage[1] != target_id else marriage[2]
+            p_info = get_user_info(partner_id)
+            partner = f"{p_info['first_name']} {p_info['last_name']}" if p_info else str(partner_id)
         msg = f"📊 Профиль {name}:\n"
         msg += f"ID: {target_id}\n"
         msg += f"Роль: {role}\n"
         msg += f"💰 БТС: {row[3]}\n"
         msg += f"🧪 Дофамин: {row[4]}\n"
         msg += f"⭐ Звёзды: {row[11]}\n"
+        msg += f"🪙 PKR: {row[20]}\n"
         msg += f"Герцог: {herzog}\n"
         msg += f"Защита: {protection}\n"
-        msg += f"Клан: {clan_name}"
+        msg += f"Клан: {clan_name}\n"
+        msg += f"Семья: {family_name}\n"
+        msg += f"Брак: {partner}"
         send_message(event.peer_id, msg)
 
     elif command == 'казино':
@@ -1116,7 +1555,9 @@ def process_command(event):
             send_message(event.peer_id, "⛔ Недостаточно прав (Админ+).")
             return
         target_id, clean_args = get_target_and_clean_args(event, args)
-        if not target_id or not clean_args:
+        if target_id is None:
+            target_id = user_id
+        if not clean_args:
             send_message(event.peer_id, "Использование: /выдатьбтс (ссылка/ответ) (кол-во)")
             return
         try:
@@ -1223,7 +1664,11 @@ def process_command(event):
             send_message(event.peer_id, "Использование: /sp (текст)")
             return
         message = ' '.join(args)
-        trusted = json.loads(db_get_user(user_id)[12]) if db_get_user(user_id) else []
+        row = db_get_user(user_id)
+        if not row:
+            send_message(event.peer_id, "❌ Вы не зарегистрированы.")
+            return
+        trusted = json.loads(row[12]) if row[12] else []
         if not trusted:
             send_message(event.peer_id, "❌ Список доверенных пуст. Добавьте через /sp.")
             return
@@ -1410,7 +1855,7 @@ def process_command(event):
             for fid in friends:
                 try:
                     api.messages.addChatUser(chat_id=chat_id, user_id=fid)
-                    time.sleep(2)  # задержка 2 секунды
+                    time.sleep(2)
                 except:
                     continue
             send_message(event.peer_id, f"✅ Приглашено {len(friends)} друзей.")
@@ -1483,11 +1928,11 @@ def process_command(event):
         if not photo_data:
             send_message(event.peer_id, "❌ Ошибка загрузки.")
             return
-        upload = vk.photos.getMessagesUploadServer(peer_id=event.peer_id)['upload_url']
-        response = requests.post(upload, files={'photo': ('avatar.jpg', photo_data, 'image/jpeg')}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        attachment = f"photo{saved['owner_id']}_{saved['id']}"
-        send_message(event.peer_id, attachment=attachment)
+        attachment = upload_photo_bytes_to_vk(event.peer_id, photo_data, 'avatar.jpg')
+        if attachment:
+            send_message(event.peer_id, attachment=attachment)
+        else:
+            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
 
     elif command == '-смс':
         if not is_admin(user_id) and user_id not in get_access_users():
@@ -1513,46 +1958,32 @@ def process_command(event):
             send_message(event.peer_id, f"❌ Ошибка: {e}")
 
     elif command == 'цитата':
-        if not args:
-            send_message(event.peer_id, "Использование: /цитата (текст)")
+        reply = get_reply_message(event)
+        if reply and reply.get('text'):
+            text = reply['text']
+        elif args:
+            text = ' '.join(args)
+        else:
+            send_message(event.peer_id, "Использование: /цитата (текст) или ответьте на сообщение")
             return
-        text = ' '.join(args)
-        img = Image.new('RGB', (800, 400), color=(0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", size=32)
-        except:
-            font = ImageFont.load_default()
-        draw.text((400, 200), text, fill=(255, 255, 255), font=font, anchor='mm')
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        upload = vk.photos.getMessagesUploadServer(peer_id=event.peer_id)['upload_url']
-        response = requests.post(upload, files={'photo': ('quote.png', buf, 'image/png')}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        attachment = f"photo{saved['owner_id']}_{saved['id']}"
-        send_message(event.peer_id, attachment=attachment)
+        buf = generate_quote_image(text)
+        attachment = upload_photo_bytes_to_vk(event.peer_id, buf.getvalue(), 'quote.png')
+        if attachment:
+            send_message(event.peer_id, attachment=attachment)
+        else:
+            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
 
     elif command == 'демо':
         if not args:
             send_message(event.peer_id, "Использование: /демо (текст)")
             return
         text = ' '.join(args)
-        img = Image.new('RGB', (600, 400), color=(0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", size=40)
-        except:
-            font = ImageFont.load_default()
-        draw.text((300, 200), text, fill=(255, 0, 0), font=font, anchor='mm')
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        upload = vk.photos.getMessagesUploadServer(peer_id=event.peer_id)['upload_url']
-        response = requests.post(upload, files={'photo': ('demo.png', buf, 'image/png')}).json()
-        saved = vk.photos.saveMessagesPhoto(**response)[0]
-        attachment = f"photo{saved['owner_id']}_{saved['id']}"
-        send_message(event.peer_id, attachment=attachment)
+        buf = generate_demotivator(text)
+        attachment = upload_photo_bytes_to_vk(event.peer_id, buf.getvalue(), 'demo.png')
+        if attachment:
+            send_message(event.peer_id, attachment=attachment)
+        else:
+            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
 
     elif command == 'пинг':
         send_message(event.peer_id, "🏓 Понг!")
@@ -1566,7 +1997,7 @@ def process_command(event):
         if attachment:
             send_message(event.peer_id, attachment=attachment)
         else:
-            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
+            send_message(event.peer_id, "❌ Ошибка загрузки фото. Убедитесь, что токен имеет право photos.")
 
     elif command == 'ножки':
         photo_path = get_random_image(os.path.join(IMAGES_DIR, 'legs'))
@@ -1577,7 +2008,7 @@ def process_command(event):
         if attachment:
             send_message(event.peer_id, attachment=attachment)
         else:
-            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
+            send_message(event.peer_id, "❌ Ошибка загрузки фото. Убедитесь, что токен имеет право photos.")
 
     elif command == 'пикча':
         photo_path = get_random_image(os.path.join(IMAGES_DIR, 'gort'))
@@ -1588,7 +2019,7 @@ def process_command(event):
         if attachment:
             send_message(event.peer_id, attachment=attachment)
         else:
-            send_message(event.peer_id, "❌ Ошибка загрузки фото.")
+            send_message(event.peer_id, "❌ Ошибка загрузки фото. Убедитесь, что токен имеет право photos.")
 
     elif command == 'анекдот':
         send_message(event.peer_id, random.choice(ANECDOTES))
@@ -1758,13 +2189,13 @@ def process_command(event):
         send_message(event.peer_id, f"🎁 Вы получили {prize} БТС!")
 
     elif command == 'helpr1':
-        send_message(event.peer_id, "📖 Команды Элиты:\n/doxelp — закрытая информация\n/стат — профиль")
+        send_message(event.peer_id, "📖 Команды Элиты:\n/doxelp — закрытая информация\n/стат — профиль\n/топбтс, /топдоф, /герцоги, /защищённые\n/коин, /купитькоин, /продатькоин\n/жениться, /развестись\n/семья (создать, вступить, выйти, список, инфо, пополнить)")
 
     elif command == 'helpr2':
-        send_message(event.peer_id, "📖 Команды Князя:\n/doxelp — закрытая информация\n/+доступ — выдать доступ к -смс\n/-доступ — забрать доступ")
+        send_message(event.peer_id, "📖 Команды Князя:\n/doxelp — закрытая информация\n/+доступ — выдать доступ к -смс\n/-доступ — забрать доступ\n/выдатьбтс — выдать BTC\n/выдатьдоф — выдать дофамин\n/-дофамин — забрать дофамин\n/выдгерцог — выдать герцога\n/забгерцог — забрать герцога\n/стафф — персонал\n/доступы — список доступа\n/логи — логи команд\n/свести, /развести — браки\n/удалитьсемью, /удалитьклан\n/newreg — изменить дату регистрации")
 
     elif command == 'helpr3':
-        send_message(event.peer_id, "📖 Команды Императора:\n/doxelp — закрытая информация\n/+доступ — выдать доступ к -смс\n/-доступ — забрать доступ")
+        send_message(event.peer_id, "📖 Команды Императора:\nВсе команды Князя +\n/блокировки, /баны — баны\n/рассылка — рассылка\n/restart, /stop\n/сброс — сбросить токен\n/токен инфа — проверить токен\n/курс (USD/EUR/BTC/PKR)\n/пикча, /тян, /ножки, /демо, /цитата")
 
     elif command == 'rcode':
         if not is_admin(user_id):
@@ -1956,16 +2387,16 @@ def process_command(event):
         if not is_creator(user_id):
             send_message(event.peer_id, "⛔ Только создатель.")
             return
-        cursor.execute('SELECT user_id, role, btc, dofamin, stars FROM users')
+        cursor.execute('SELECT user_id, role, btc, dofamin, stars, poker_koins FROM users')
         rows = cursor.fetchall()
         if not rows:
             send_message(event.peer_id, "База данных пуста.")
             return
         msg = "📋 Зарегистрированные пользователи:\n"
-        for uid, role, btc, dof, stars in rows:
+        for uid, role, btc, dof, stars, pkr in rows:
             info = get_user_info(uid)
             name = f"{info['first_name']} {info['last_name']}" if info else str(uid)
-            msg += f"{name} ({uid}) — роль {role}, БТС {btc}, дофамин {dof}, звёзды {stars}\n"
+            msg += f"{name} ({uid}) — роль {role}, БТС {btc}, дофамин {dof}, звёзды {stars}, PKR {pkr}\n"
         send_message(event.peer_id, msg)
 
     elif command == 'сброс':
@@ -2050,9 +2481,9 @@ def process_command(event):
             send_message(event.peer_id, f"✅ Списано {amount} дофамина.")
 
     elif command == 'статвся':
-        cursor.execute('SELECT COUNT(*), SUM(btc), SUM(dofamin), SUM(stars) FROM users')
-        count, btc_sum, dof_sum, stars_sum = cursor.fetchone()
-        send_message(event.peer_id, f"📊 Общая статистика:\nПользователей: {count}\nБТС: {btc_sum or 0}\nДофамин: {dof_sum or 0}\nЗвёзды: {stars_sum or 0}")
+        cursor.execute('SELECT COUNT(*), SUM(btc), SUM(dofamin), SUM(stars), SUM(poker_koins) FROM users')
+        count, btc_sum, dof_sum, stars_sum, pkr_sum = cursor.fetchone()
+        send_message(event.peer_id, f"📊 Общая статистика:\nПользователей: {count}\nБТС: {btc_sum or 0}\nДофамин: {dof_sum or 0}\nЗвёзды: {stars_sum or 0}\nPKR: {pkr_sum or 0}")
 
     elif command == 'givstar':
         if not is_admin(user_id):
@@ -2073,11 +2504,15 @@ def process_command(event):
         send_message(event.peer_id, f"✅ Выдано {amount} звёзд.")
 
     elif command == '-kd':
-        if not is_creator(user_id):
-            send_message(event.peer_id, "⛔ Только создатель.")
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
             return
-        db_update_user(user_id, last_dofamin_time=0, last_steal_time=0, last_prize_time=0)
-        send_message(event.peer_id, "✅ Кулдауны сброшены.")
+        target_id, _ = get_target_and_clean_args(event, args)
+        if target_id is None:
+            target_id = user_id
+        db_create_user(target_id)
+        db_update_user(target_id, last_dofamin_time=0, last_steal_time=0, last_prize_time=0)
+        send_message(event.peer_id, f"✅ Кулдауны сброшены для пользователя {target_id}.")
 
     elif command == '+токен':
         if not args:
@@ -2146,7 +2581,11 @@ def process_command(event):
             return
         msg = "⛔ Список банов:\n"
         for uid, reason, expiry, by in rows:
-            msg += f"{uid} — {reason} (до {expiry if expiry==0 else datetime.datetime.fromtimestamp(expiry).strftime('%d.%m.%Y %H:%M')})\n"
+            if expiry == 0:
+                expiry_str = 'навсегда'
+            else:
+                expiry_str = datetime.datetime.fromtimestamp(expiry).strftime('%d.%m.%Y %H:%M')
+            msg += f"{uid} — {reason} (до {expiry_str})\n"
         send_message(event.peer_id, msg)
 
     elif command == 'block':
@@ -2198,7 +2637,132 @@ def process_command(event):
         if not row:
             send_message(event.peer_id, "❌ Вы не зарегистрированы.")
             return
-        send_message(event.peer_id, f"📊 Ваш баланс:\nБТС: {row[3]}\nДофамин: {row[4]}\nЗвёзды: {row[11]}")
+        send_message(event.peer_id, f"📊 Ваш баланс:\nБТС: {row[3]}\nДофамин: {row[4]}\nЗвёзды: {row[11]}\nPKR: {row[20]}")
+
+    elif command == 'логи':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        limit = 20
+        since = None
+        if args:
+            try:
+                hours = float(args[0])
+                since = time.time() - hours * 3600
+                limit = 100
+            except:
+                limit = 20
+        logs = get_command_logs(limit=limit, since=since)
+        if not logs:
+            send_message(event.peer_id, "Нет записей.")
+            return
+        msg = "📋 Последние команды:\n"
+        for uid, cmd, args_str, cid, ts in logs:
+            time_str = datetime.datetime.fromtimestamp(ts).strftime('%d.%m %H:%M')
+            user_info = get_user_info(uid)
+            name = f"{user_info['first_name']} {user_info['last_name']}" if user_info else str(uid)
+            msg += f"{time_str} {name}: /{cmd} {args_str[:30]}\n"
+            if len(msg) > 3500:
+                send_message(event.peer_id, msg)
+                msg = ""
+        if msg:
+            send_message(event.peer_id, msg)
+
+    elif command == 'запрет':
+        if not is_creator(user_id):
+            send_message(event.peer_id, "⛔ Только создатель может запрещать команды.")
+            return
+        if not args:
+            send_message(event.peer_id, "Использование: /запрет (команда)")
+            return
+        cmd = args[0].lower()
+        if is_command_banned(cmd):
+            send_message(event.peer_id, f"❌ Команда '{cmd}' уже запрещена.")
+            return
+        ban_command(cmd, user_id)
+        send_message(event.peer_id, f"✅ Команда '{cmd}' запрещена.")
+
+    elif command == 'разрешить':
+        if not is_creator(user_id):
+            send_message(event.peer_id, "⛔ Только создатель может разрешать команды.")
+            return
+        if not args:
+            send_message(event.peer_id, "Использование: /разрешить (команда)")
+            return
+        cmd = args[0].lower()
+        if not is_command_banned(cmd):
+            send_message(event.peer_id, f"❌ Команда '{cmd}' не запрещена.")
+            return
+        unban_command(cmd)
+        send_message(event.peer_id, f"✅ Команда '{cmd}' разрешена.")
+
+    elif command == 'косметика':
+        target_id, _ = get_target_and_clean_args(event, args)
+        target_id = target_id or user_id
+        buf = generate_profile_card(target_id)
+        if not buf:
+            send_message(event.peer_id, "❌ Не удалось создать карточку.")
+            return
+        attachment = upload_photo_bytes_to_vk(event.peer_id, buf.getvalue(), 'profile.png')
+        if attachment:
+            send_message(event.peer_id, "🎨 Ваш красивый профиль:", attachment=attachment)
+        else:
+            send_message(event.peer_id, "❌ Ошибка загрузки фото. Нужен токен с правом photos.")
+
+    elif command == 'newreg':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id, clean_args = get_target_and_clean_args(event, args)
+        if target_id is None and len(clean_args) >= 2:
+            target_id = extract_user_id_from_link(clean_args[1])
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя ответом, ссылкой или упоминанием.")
+            return
+        if not clean_args:
+            send_message(event.peer_id, "Использование: /newreg ДД.ММ.ГГГГ (ссылка) или ответьте на сообщение.")
+            return
+        date_str = clean_args[0]
+        try:
+            reg_ts = datetime.datetime.strptime(date_str, '%d.%m.%Y').timestamp()
+        except:
+            send_message(event.peer_id, "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
+            return
+        db_create_user(target_id)
+        db_update_user(target_id, registered_at=reg_ts)
+        send_message(event.peer_id, f"✅ Дата регистрации пользователя {target_id} изменена на {date_str}.")
+
+    elif command == 'удалитьсемью':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id, _ = get_target_and_clean_args(event, args)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя — создателя семьи.")
+            return
+        fid = get_family_by_user(target_id)
+        if not fid:
+            send_message(event.peer_id, "Пользователь не в семье.")
+            return
+        delete_family(fid)
+        send_message(event.peer_id, f"Семья пользователя {target_id} удалена.")
+
+    elif command == 'удалитьклан':
+        if not is_admin(user_id):
+            send_message(event.peer_id, "⛔ Недостаточно прав.")
+            return
+        target_id, _ = get_target_and_clean_args(event, args)
+        if not target_id:
+            send_message(event.peer_id, "Укажите пользователя — лидера клана.")
+            return
+        clan_id = get_clan_by_user(target_id)
+        if not clan_id:
+            send_message(event.peer_id, "Пользователь не в клане.")
+            return
+        cursor.execute('DELETE FROM clans WHERE id=?', (clan_id,))
+        cursor.execute('DELETE FROM clan_members WHERE clan_id=?', (clan_id,))
+        conn.commit()
+        send_message(event.peer_id, f"Клан пользователя {target_id} удалён.")
 
     else:
         send_message(event.peer_id, "Неизвестная команда. Введите /help для списка.")
