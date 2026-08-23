@@ -2836,18 +2836,22 @@ def process_command(event):
 
     else:
         send_message(event.peer_id, "Неизвестная команда. Введите /help для списка.")
-
-# ================= ЗАПУСК SELF-BOT'ОВ ПРИ СТАРТЕ =================
 def start_all_user_bots():
     """Запускает self-bot'ы для всех сохранённых пользователей с токенами."""
-    cursor.execute('SELECT user_id, access_token FROM users WHERE access_token IS NOT NULL AND is_disabled=0')
-    rows = cursor.fetchall()
+    # Создаём локальное соединение, чтобы не конфликтовать с глобальным курсором
+    local_conn = sqlite3.connect(DB_FILE)
+    local_cursor = local_conn.cursor()
+    local_cursor.execute(
+        'SELECT user_id, access_token FROM users WHERE access_token IS NOT NULL AND is_disabled=0'
+    )
+    rows = local_cursor.fetchall()
+    local_conn.close()
+
     for uid, token in rows:
         if uid not in user_threads or not user_threads[uid].is_alive():
             t = threading.Thread(target=run_user_bot, args=(uid, token), daemon=True)
             user_threads[uid] = t
             t.start()
-
 # ================= ЗАПУСК ОСНОВНОГО БОТА =================
 print("Основной бот запущен. Ожидание сообщений...")
 # Запускаем self-bot'ы для ранее зарегистрированных пользователей
