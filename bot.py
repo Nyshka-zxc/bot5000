@@ -875,24 +875,25 @@ def run_user_bot(user_id, token):
         # Добавляем ID владельца токена в событие, т.к. self-bot его не содержит
         event.user_id = user_id
 
-        # Подменяем глобальные vk и uploader на сессию пользователя
-        global vk, uploader
-        old_vk, old_uploader = vk, uploader
-        vk = api
-        uploader = VkUpload(session)
-
+        old_vk, old_uploader = None, None
         try:
-            # Захватываем блокировку, чтобы не конфликтовать с основным ботом
             with vk_lock:
+                global vk, uploader
+                old_vk, old_uploader = vk, uploader
+                vk = api
+                uploader = VkUpload(session)
                 process_command(event)
         except Exception as e:
             print(f"Ошибка в self-bot {user_id}: {e}")
             try:
+                if old_vk and old_uploader:
+                    vk, uploader = old_vk, old_uploader
                 vk.messages.send(peer_id=event.peer_id, message=f"❌ Ошибка: {e}", random_id=get_random_id())
             except:
                 pass
         finally:
-            vk, uploader = old_vk, old_uploader
+            if old_vk and old_uploader:
+                vk, uploader = old_vk, old_uploader
 
         # Проверка токена после команды
         try:
