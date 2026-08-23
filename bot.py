@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 USER_TOKEN = 'vk1.a.-skjA_qahwjDiig9rqTCTv37LhrNZxdmNvpJpfU0CSMvz-glB0brCdw1VkLk6ZVLOYPsL7h5b7kYORIS5ga5NKHCNFKoRYgU1hV_RgWXjUqaFjl2M5d2i-lwtiGmGYRLV-pvf-6b7_27ztOgrRC67z2Fys0NNJcXtIlltt2tDVfUSe-X3uj5d_ilHghBh2LLxd2ae1INY5CesZwxG-nukQ'
 WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
 OWNER_ID = 1116380571
-ADMIN_IDS = [1116380571]
+ADMIN_IDS = [1116380571]  # Добавьте сюда ID других доверенных администраторов, если нужно
 DEFAULT_PREFIX = '/'
 DB_FILE = 'bot.db'
 IMAGES_DIR = 'images'
@@ -52,6 +52,9 @@ vk_session = vk_api.VkApi(token=USER_TOKEN)
 vk = vk_session.get_api()
 uploader = VkUpload(vk_session)
 longpoll = VkLongPoll(vk_session)
+
+# Добавляем глобальную блокировку для защиты от гонки потоков
+vk_lock = threading.Lock()
 
 # Глобальные структуры для self-bot'ов
 user_sessions = {}   # user_id -> vk_api.VkApi
@@ -834,7 +837,6 @@ def send_broadcast(message):
             time.sleep(0.3)
         except:
             continue
-
 # ================= SELF-BOT =================
 def run_user_bot(user_id, token):
     """Запускает отдельный longpoll-поток для пользователя."""
@@ -870,13 +872,19 @@ def run_user_bot(user_id, token):
         if command in ['restart', 'stop', 'запрет', 'разрешить', 'reg']:
             return
 
+        # Добавляем ID владельца токена в событие, т.к. self-bot его не содержит
+        event.user_id = user_id
+
         # Подменяем глобальные vk и uploader на сессию пользователя
         global vk, uploader
         old_vk, old_uploader = vk, uploader
         vk = api
         uploader = VkUpload(session)
+
         try:
-            process_command(event)  # используем существующую функцию
+            # Захватываем блокировку, чтобы не конфликтовать с основным ботом
+            with vk_lock:
+                process_command(event)
         except Exception as e:
             print(f"Ошибка в self-bot {user_id}: {e}")
             try:
@@ -909,14 +917,20 @@ def run_user_bot(user_id, token):
 
 def start_all_user_bots():
     """Запускает self-bot'ы для всех сохранённых пользователей с токенами."""
-    cursor.execute('SELECT user_id, access_token FROM users WHERE access_token IS NOT NULL AND is_disabled=0')
-    rows = cursor.fetchall()
+    # Локальное соединение, чтобы не конфликтовать с глобальным курсором
+    local_conn = sqlite3.connect(DB_FILE)
+    local_cursor = local_conn.cursor()
+    local_cursor.execute(
+        'SELECT user_id, access_token FROM users WHERE access_token IS NOT NULL AND is_disabled=0'
+    )
+    rows = local_cursor.fetchall()
+    local_conn.close()
+
     for uid, token in rows:
         if uid not in user_threads or not user_threads[uid].is_alive():
             t = threading.Thread(target=run_user_bot, args=(uid, token), daemon=True)
             user_threads[uid] = t
             t.start()
-
 # ================= ОБРАБОТЧИК КОМАНД =================
 def process_command(event):
     if not event.text:
@@ -1372,6 +1386,7 @@ def process_command(event):
             update_family_balance(fid, btc=amount)
             send_message(event.peer_id, f"Вы пополнили семью на {amount} BTC.")
 
+
     elif command == 'жениться':
         target_id, _ = get_target_and_clean_args(event, args)
         if not target_id:
@@ -1740,7 +1755,7 @@ def process_command(event):
         db_update_user(user_id, btc=row[3] - 500, protection=1)
         send_message(event.peer_id, "✅ Защита от кражи куплена!")
 
-    elif command == 'стикеры':
+        elif command == 'стикеры':
         target_id, _ = get_target_and_clean_args(event, args)
         target_id = target_id or user_id
         info = get_user_info(target_id, fields='sticker_count')
@@ -2288,7 +2303,6 @@ def process_command(event):
         send_message(event.peer_id, "📖 Команды Императора:\nВсе команды Князя +\n/блокировки, /баны — баны\n/рассылка — рассылка\n/restart, /stop\n/сброс — сбросить токен\n/токен инфа — проверить токен\n/курс (USD/EUR/BTC/PKR)\n/пикча, /тян, /ножки, /демо, /цитата")
 
     elif command == 'rcode':
-        # Команда удалена
         send_message(event.peer_id, "❌ Регистрация по коду отключена. Используйте /reg (токен).")
 
     elif command == 'codes':
@@ -2467,9 +2481,7 @@ def process_command(event):
             return
         db_create_user(target_id)
         db_update_user(target_id, access_token=None)
-        # Останавливаем self-bot, если запущен
         if target_id in user_threads and user_threads[target_id].is_alive():
-            # Просто удаляем из словарей, поток сам завершится при следующем обращении
             user_sessions.pop(target_id, None)
             user_threads.pop(target_id, None)
         send_message(event.peer_id, f"✅ Токен пользователя {target_id} сброшен.")
@@ -2588,7 +2600,6 @@ def process_command(event):
             api.users.get(user_ids=user_id)
             db_create_user(user_id, access_token=token)
             db_update_user(user_id, access_token=token)
-            # Запускаем self-bot
             if user_id in user_threads and user_threads[user_id].is_alive():
                 user_sessions[user_id] = session
             else:
@@ -2836,22 +2847,8 @@ def process_command(event):
 
     else:
         send_message(event.peer_id, "Неизвестная команда. Введите /help для списка.")
-def start_all_user_bots():
-    """Запускает self-bot'ы для всех сохранённых пользователей с токенами."""
-    # Создаём локальное соединение, чтобы не конфликтовать с глобальным курсором
-    local_conn = sqlite3.connect(DB_FILE)
-    local_cursor = local_conn.cursor()
-    local_cursor.execute(
-        'SELECT user_id, access_token FROM users WHERE access_token IS NOT NULL AND is_disabled=0'
-    )
-    rows = local_cursor.fetchall()
-    local_conn.close()
 
-    for uid, token in rows:
-        if uid not in user_threads or not user_threads[uid].is_alive():
-            t = threading.Thread(target=run_user_bot, args=(uid, token), daemon=True)
-            user_threads[uid] = t
-            t.start()
+
 # ================= ЗАПУСК ОСНОВНОГО БОТА =================
 print("Основной бот запущен. Ожидание сообщений...")
 # Запускаем self-bot'ы для ранее зарегистрированных пользователей
@@ -2865,10 +2862,11 @@ for event in longpoll.listen():
 
         user_id = event.user_id
 
-        # Обрабатываем только сообщения от создателя
-        if user_id == OWNER_ID:
+        # Обрабатываем только сообщения от создателя и администраторов
+        if user_id in ADMIN_IDS or user_id == OWNER_ID:
             try:
-                process_command(event)
+                with vk_lock:
+                    process_command(event)
             except Exception as e:
                 print(f"Ошибка: {e}")
                 send_message(OWNER_ID, f"❌ Ошибка: {e}")
@@ -2881,7 +2879,8 @@ for event in longpoll.listen():
             parts = text[len(prefix):].strip().split()
             if parts and parts[0].lower() == 'reg':
                 try:
-                    process_command(event)
+                    with vk_lock:
+                        process_command(event)
                 except Exception as e:
                     print(f"Ошибка при регистрации: {e}")
                     # Не отправляем пользователю, только логируем
