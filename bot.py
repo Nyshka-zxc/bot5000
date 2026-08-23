@@ -25,7 +25,7 @@ WEATHER_API_KEY = 'ac9cd4dc68922ec268a27655f9e03af2'
 OWNER_ID = 1116380571
 ADMIN_IDS = [1116380571]  # Добавьте сюда ID других доверенных администраторов, если нужно
 DEFAULT_PREFIX = '/'
-DB_FILE = 'bot.db'
+DB_FILE = '/tmp/bot.db'
 IMAGES_DIR = 'images'
 TEMPLATES_DIR = 'templates'
 
