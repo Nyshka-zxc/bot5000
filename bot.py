@@ -2861,7 +2861,9 @@ for event in longpoll.listen():
         if event.from_me:
             continue
 
-        user_id = event.user_id
+        user_id = getattr(event, 'user_id', None) or getattr(event, 'from_id', None)
+        if not user_id:
+            continue
 
         # Обрабатываем только сообщения от создателя и администраторов
         if user_id in ADMIN_IDS or user_id == OWNER_ID:
