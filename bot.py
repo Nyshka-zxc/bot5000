@@ -1754,6 +1754,7 @@ def process_command(event):
             return
         db_update_user(user_id, btc=row[3] - 500, protection=1)
         send_message(event.peer_id, "✅ Защита от кражи куплена!")
+        
 
         elif command == 'стикеры':
         target_id, _ = get_target_and_clean_args(event, args)
